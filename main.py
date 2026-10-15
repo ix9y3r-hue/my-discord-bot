@@ -1,14 +1,16 @@
 import asyncio
+import json
 import logging
 import os
 import shlex
 import shutil
+import socket
 from threading import Thread
 from typing import Any
 
 import discord
 import yt_dlp
-from discord.ext import commands
+from discord.ext import commands, tasks
 from flask import Flask
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -61,7 +63,31 @@ queues: dict[int, list[tuple[Track, discord.abc.Messageable]]] = {}
 now_playing: dict[int, Track] = {}
 voice_locks: dict[int, asyncio.Lock] = {}
 voice_connection_locks: dict[int, asyncio.Lock] = {}
-voice_targets: dict[int, int] = {}
+STATE_FILE = os.getenv("STATE_FILE", "voice_state.json")
+
+
+def load_targets() -> dict[int, int]:
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            return {int(k): int(v) for k, v in json.load(f).items()}
+    except (OSError, ValueError):
+        return {}
+
+
+# الروم الصوتي المطلوب بقاء البوت فيه لكل سيرفر (يُحفظ في ملف ليرجع بعد إعادة التشغيل)
+voice_targets: dict[int, int] = load_targets()
+
+
+def set_target(guild_id: int, channel_id: int | None) -> None:
+    if channel_id is None:
+        voice_targets.pop(guild_id, None)
+    else:
+        voice_targets[guild_id] = channel_id
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({str(k): v for k, v in voice_targets.items()}, f)
+    except OSError:
+        logger.warning("Could not save voice state")
 voice_reconnect_tasks: dict[int, asyncio.Task[None]] = {}
 
 
@@ -219,7 +245,7 @@ async def connect_voice(
     lock = voice_connection_locks.setdefault(guild.id, asyncio.Lock())
     async with lock:
         previous_target = voice_targets.get(guild.id)
-        voice_targets[guild.id] = channel.id
+        set_target(guild.id, channel.id)
         try:
             voice_client = guild.voice_client
             if voice_client and voice_client.is_connected():
@@ -231,10 +257,7 @@ async def connect_voice(
                 voice_client = await channel.connect(timeout=25.0, reconnect=True)
             return voice_client
         except Exception:
-            if previous_target is None:
-                voice_targets.pop(guild.id, None)
-            else:
-                voice_targets[guild.id] = previous_target
+            set_target(guild.id, previous_target)
             raise
 
 
@@ -250,7 +273,7 @@ async def reconnect_to_voice(guild_id: int, channel_id: int) -> None:
         guild = bot.get_guild(guild_id)
         channel = guild.get_channel(channel_id) if guild else None
         if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
-            voice_targets.pop(guild_id, None)
+            set_target(guild_id, None)
             return
 
         try:
@@ -269,9 +292,57 @@ async def reconnect_to_voice(guild_id: int, channel_id: int) -> None:
             logger.exception("Voice reconnection attempt %s failed", attempt)
 
 
+def ensure_reconnect(guild_id: int) -> None:
+    """يشغّل مهمة إعادة الاتصال إذا ما فيه مهمة شغالة."""
+    target_id = voice_targets.get(guild_id)
+    if target_id is None:
+        return
+    current_task = voice_reconnect_tasks.get(guild_id)
+    if current_task and not current_task.done():
+        return
+
+    task = asyncio.create_task(reconnect_to_voice(guild_id, target_id))
+    voice_reconnect_tasks[guild_id] = task
+
+    def clear_task(done: asyncio.Task[None]) -> None:
+        if voice_reconnect_tasks.get(guild_id) is done:
+            voice_reconnect_tasks.pop(guild_id, None)
+
+    task.add_done_callback(clear_task)
+
+
+@tasks.loop(seconds=30)
+async def voice_watchdog() -> None:
+    """كل 30 ثانية يتأكد أن البوت في الروم المطلوب، وإذا لا يرجّعه."""
+    for guild_id, channel_id in list(voice_targets.items()):
+        guild = bot.get_guild(guild_id)
+        if not guild:
+            continue
+        voice_client = guild.voice_client
+        if not (
+            voice_client
+            and voice_client.is_connected()
+            and voice_client.channel.id == channel_id
+        ):
+            ensure_reconnect(guild_id)
+
+
 @bot.event
 async def on_ready() -> None:
     logger.info("تم تسجيل الدخول باسم %s", bot.user)
+
+    # اختياري: روم افتراضي من متغير بيئة VOICE_CHANNEL_ID (يفيد بعد إعادة النشر على Render)
+    env_channel = os.getenv("VOICE_CHANNEL_ID")
+    if env_channel and env_channel.isdigit():
+        channel = bot.get_channel(int(env_channel))
+        if (
+            isinstance(channel, (discord.VoiceChannel, discord.StageChannel))
+            and channel.guild.id not in voice_targets
+        ):
+            set_target(channel.guild.id, channel.id)
+
+    if not voice_watchdog.is_running():
+        voice_watchdog.start()
 
 
 @bot.event
@@ -288,18 +359,7 @@ async def on_voice_state_update(
     if target_id is None or (after.channel and after.channel.id == target_id):
         return
 
-    current_task = voice_reconnect_tasks.get(guild_id)
-    if current_task and not current_task.done():
-        return
-
-    task = asyncio.create_task(reconnect_to_voice(guild_id, target_id))
-    voice_reconnect_tasks[guild_id] = task
-
-    def clear_task(done: asyncio.Task[None]) -> None:
-        if voice_reconnect_tasks.get(guild_id) is done:
-            voice_reconnect_tasks.pop(guild_id, None)
-
-    task.add_done_callback(clear_task)
+    ensure_reconnect(guild_id)
 
 
 # ───────────────────────── الأوامر ─────────────────────────
@@ -438,7 +498,7 @@ async def show_queue(ctx: commands.Context) -> None:
 @commands.guild_only()
 async def leave_voice(ctx: commands.Context) -> None:
     guild_id = ctx.guild.id
-    voice_targets.pop(guild_id, None)
+    set_target(guild_id, None)
     reconnect_task = voice_reconnect_tasks.pop(guild_id, None)
     if reconnect_task and not reconnect_task.done():
         reconnect_task.cancel()
@@ -471,6 +531,20 @@ async def on_command_error(
 # ───────────────────────── التشغيل ─────────────────────────
 
 
+def ensure_single_instance(port: int) -> None:
+    """إذا المنفذ مشغول معناه فيه نسخة ثانية من البوت تعمل، فنخرج."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("0.0.0.0", port))
+    except OSError:
+        raise SystemExit(
+            f"المنفذ {port} مشغول: فيه نسخة ثانية من البوت تعمل. "
+            "أوقفها أولًا (Stop) ثم شغّل نسخة واحدة فقط."
+        )
+    finally:
+        probe.close()
+
+
 def keep_alive() -> None:
     app = Flask(__name__)
 
@@ -479,6 +553,7 @@ def keep_alive() -> None:
         return "I'm alive"
 
     port = int(os.getenv("PORT", "8080"))
+    ensure_single_instance(port)
     Thread(
         target=lambda: app.run(host="0.0.0.0", port=port),
         daemon=True,
@@ -493,4 +568,3 @@ if __name__ == "__main__":
 
     keep_alive()
     bot.run(TOKEN, log_handler=None)
-    
