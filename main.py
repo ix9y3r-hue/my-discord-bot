@@ -189,11 +189,11 @@ async def reconnect_to_voice(guild_id: int, channel_id: int) -> None:
                 if voice_client and voice_client.is_connected():
                     if voice_client.channel.id == channel_id:
                         return
-                    await voice_client.move_to(channel, timeout=25.0)
+                    await voice_client.move_to(channel, timeout=30.0)
                 else:
                     if voice_client:
                         await voice_client.disconnect(force=True)
-                    await channel.connect(timeout=25.0, reconnect=True)
+                    await channel.connect(timeout=30.0, reconnect=True)
 
             if queues.get(guild_id):
                 await play_next(guild)
