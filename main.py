@@ -91,6 +91,8 @@ def set_target(guild_id: int, channel_id: int | None) -> None:
             json.dump({str(k): v for k, v in voice_targets.items()}, f)
     except OSError:
         logger.warning("Could not save voice state")
+
+
 voice_reconnect_tasks: dict[int, asyncio.Task[None]] = {}
 
 
@@ -602,4 +604,9 @@ def keep_alive() -> None:
 
 if __name__ == "__main__":
     if not TOKEN:
-        raise RuntimeErro
+        raise RuntimeError("أضف توكن البوت في Secrets باسم DISCORD_TOKEN.")
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("FFmpeg غير موجود.")
+
+    keep_alive()
+    bot.run(TOKEN, log_handler=None)
