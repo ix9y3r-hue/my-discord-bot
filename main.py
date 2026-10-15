@@ -15,8 +15,7 @@ PREFIX = "!"
 
 def get_command_prefix(_bot: commands.Bot, message: discord.Message) -> str:
     content = message.content.strip()
-    first_word = content.split(maxsplit=1)
-    if first_word and first_word[0] == "ش":
+    if content.startswith("ش"):
         return ""
     if content in {"وقف", "ك", "س"}:
         return ""
@@ -48,7 +47,6 @@ FFMPEG_OPTIONS = {
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 ytdl_lock = asyncio.Lock()
 
-# Keep queues and current tracks separate for each Discord server.
 queues: dict[int, list[tuple[dict[str, str], discord.abc.Messageable]]] = {}
 now_playing: dict[int, dict[str, str]] = {}
 voice_locks: dict[int, asyncio.Lock] = {}
@@ -104,7 +102,6 @@ async def play_next(guild: discord.Guild) -> None:
                 now_playing.pop(guild.id, None)
             return
 
-        # Skip unavailable tracks rather than leaving the queue stuck.
         while queue:
             track, requester_channel = queue.pop(0)
             try:
@@ -113,10 +110,7 @@ async def play_next(guild: discord.Guild) -> None:
                 if not stream_url:
                     raise ValueError("لم أتمكن من الحصول على رابط البث.")
 
-                # FFmpeg emits Opus frames directly, so playback does not rely
-                # on Python locating a separate system libopus shared library.
                 source = discord.FFmpegOpusAudio(stream_url, **FFMPEG_OPTIONS)
-
                 now_playing[guild.id] = track
 
                 def after_play(error: Exception | None) -> None:
@@ -182,7 +176,6 @@ async def reconnect_to_voice(guild_id: int, channel_id: int) -> None:
         guild = bot.get_guild(guild_id)
         channel = guild.get_channel(channel_id) if guild else None
         if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
-            logger.warning("Saved voice channel is no longer available")
             voice_targets.pop(guild_id, None)
             return
 
@@ -202,21 +195,11 @@ async def reconnect_to_voice(guild_id: int, channel_id: int) -> None:
                         await voice_client.disconnect(force=True)
                     await channel.connect(timeout=25.0, reconnect=True)
 
-            logger.info("Reconnected to saved voice channel")
             if queues.get(guild_id):
                 await play_next(guild)
             return
-        except discord.Forbidden:
-            logger.exception("Discord denied voice reconnection")
-            return
-        except discord.NotFound:
-            logger.exception("Saved voice channel no longer exists")
-            voice_targets.pop(guild_id, None)
-            return
         except Exception:
             logger.exception("Voice reconnection attempt %s failed", attempt)
-
-    logger.error("Could not restore the saved voice connection")
 
 
 @bot.event
@@ -233,7 +216,6 @@ async def on_voice_state_update(
     if target_id is None or (after.channel and after.channel.id == target_id):
         return
 
-    logger.warning("Bot left its saved voice channel; scheduling reconnection")
     current_task = voice_reconnect_tasks.get(guild_id)
     if current_task and not current_task.done():
         return
@@ -256,20 +238,14 @@ async def join_voice(ctx: commands.Context) -> None:
         return
 
     channel = ctx.author.voice.channel
-    logger.info(
-        "Voice join requested: guild=%s channel=%s", ctx.guild.id, channel.id
-    )
     bot_member = ctx.guild.me
     permissions = channel.permissions_for(bot_member)
     if not permissions.view_channel or not permissions.connect:
         await ctx.send(
             "ما أقدر أدخل هذا الروم. اطلب من مسؤول السيرفر السماح للبوت "
-            "بصلاحية **View Channel** و **Connect** في إعدادات الروم."
+            "بصلاحية **View Channel** و **Connect**."
         )
         return
-
-    if not permissions.speak:
-        logger.warning("Bot can connect but cannot speak in voice channel")
 
     await ctx.send(f"⏳ أحاول دخول الروم الصوتي **{channel.name}**...")
     lock = voice_connection_locks.setdefault(ctx.guild.id, asyncio.Lock())
@@ -285,57 +261,13 @@ async def join_voice(ctx: commands.Context) -> None:
                     await voice_client.disconnect(force=True)
                 await channel.connect(timeout=25.0, reconnect=True)
             voice_targets[ctx.guild.id] = channel.id
-    except asyncio.TimeoutError:
-        if voice_targets.get(ctx.guild.id) == channel.id:
-            voice_targets.pop(ctx.guild.id, None)
-        logger.exception("Timed out while connecting to the voice channel")
-        await ctx.send(
-            "انتهت مهلة الاتصال بالروم الصوتي. تأكد أن الروم متاح، "
-            "ثم جرّب `!ادخل` مرة ثانية."
-        )
-        return
-    except discord.Forbidden:
-        if voice_targets.get(ctx.guild.id) == channel.id:
-            voice_targets.pop(ctx.guild.id, None)
-        logger.exception("Discord denied the voice channel connection")
-        await ctx.send(
-            "رفض Discord دخول البوت. تأكد من صلاحيات **View Channel** "
-            "و **Connect** للبوت في هذا الروم."
-        )
-        return
-    except discord.ClientException:
-        if voice_targets.get(ctx.guild.id) == channel.id:
-            voice_targets.pop(ctx.guild.id, None)
-        logger.exception("Discord voice client could not connect")
-        await ctx.send(
-            "تعذر إنشاء اتصال صوتي جديد. جرّب `!اخرج` ثم `!ادخل`، "
-            "وإذا استمرت المشكلة أعد تشغيل البوت."
-        )
-        return
-    except discord.HTTPException:
-        if voice_targets.get(ctx.guild.id) == channel.id:
-            voice_targets.pop(ctx.guild.id, None)
-        logger.exception("Discord API error while connecting to voice")
-        await ctx.send(
-            "حدث خطأ من Discord أثناء الاتصال بالروم. جرّب `!ادخل` بعد قليل."
-        )
-        return
     except Exception:
         if voice_targets.get(ctx.guild.id) == channel.id:
             voice_targets.pop(ctx.guild.id, None)
         logger.exception("Unexpected error while joining the voice channel")
-        await ctx.send(
-            "تعذر دخول الروم بسبب خطأ غير متوقع. راجعت سجل التشغيل "
-            "لإظهار السبب."
-        )
+        await ctx.send("تعذر دخول الروم بسبب خطأ غير متوقع.")
         return
 
-    if not permissions.speak:
-        await ctx.send(
-            f"✅ دخلت الروم الصوتي **{channel.name}**، لكن لا أملك صلاحية "
-            "**Speak** لتشغيل الأغاني."
-        )
-        return
     await ctx.send(f"✅ دخلت الروم الصوتي: **{channel.name}**")
 
 
@@ -359,33 +291,14 @@ async def play_song(ctx: commands.Context, *, search: str | None = None) -> None
                 await voice_client.move_to(ctx.author.voice.channel)
         voice_targets[ctx.guild.id] = ctx.author.voice.channel.id
     except Exception:
-        logger.exception("Could not connect to the requested voice channel")
-        await ctx.send("تعذر دخول الروم الصوتي. تحقق من صلاحيات الاتصال والتحدث.")
+        await ctx.send("تعذر دخول الروم الصوتي.")
         return
 
     await ctx.send(f"🔎 أبحث في SoundCloud عن **{search}**...")
     try:
         track = await find_track(search)
-    except yt_dlp.utils.DownloadError as exc:
-        error_text = str(exc).lower()
-        logger.warning("Track lookup failed for %r: %s", search, exc)
-        if "sign in to confirm" in error_text or "not a bot" in error_text:
-            await ctx.send(
-                "YouTube يمنع طلبات البحث من خادم Replit. اكتب اسم الأغنية "
-                "للبحث في SoundCloud أو أرسل رابط SoundCloud."
-            )
-        else:
-            await ctx.send(
-                "ما لقيت الأغنية في SoundCloud أو تعذر جلبها. "
-                "جرّب اسمًا آخر أو رابط SoundCloud."
-            )
-        return
-    except ValueError as exc:
-        await ctx.send(str(exc))
-        return
     except Exception:
-        logger.exception("Unexpected error while looking up track %r", search)
-        await ctx.send("تعذر البحث عن الأغنية الآن. حاول مرة أخرى بعد قليل.")
+        await ctx.send("ما لقيت الأغنية في SoundCloud.")
         return
 
     queues.setdefault(ctx.guild.id, []).append((track, ctx.channel))
@@ -480,16 +393,13 @@ async def on_command_error(
         return
     else:
         logger.exception("Command failed", exc_info=error)
-        await ctx.send("تعذر تنفيذ الأمر. تحقق من صلاحيات البوت وحاول مرة أخرى.")
 
 
 if not TOKEN:
-    raise RuntimeError(
-        "أضف توكن البوت في Secrets باسم DISCORD_TOKEN؛ لا تضعه في ملف الكود."
-    )
+    raise RuntimeError("أضف توكن البوت في Secrets باسم DISCORD_TOKEN.")
 
 if shutil.which("ffmpeg") is None:
-    raise RuntimeError("FFmpeg غير موجود؛ تثبيت الاعتماديات لم يكتمل.")
+    raise RuntimeError("FFmpeg غير موجود.")
 
 from flask import Flask
 from threading import Thread
@@ -503,3 +413,4 @@ def run():
     t.start()
 
 bot.run(TOKEN)
+    
