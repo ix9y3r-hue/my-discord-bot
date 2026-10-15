@@ -255,11 +255,11 @@ async def join_voice(ctx: commands.Context) -> None:
             if voice_client and voice_client.is_connected():
                 if voice_client.channel != channel:
                     voice_targets[ctx.guild.id] = channel.id
-                    await voice_client.move_to(channel, timeout=30.0)
+                    await voice_client.move_to(channel, timeout=50.0)
             else:
                 if voice_client:
                     await voice_client.disconnect(force=True)
-                await channel.connect(timeout=30.0, reconnect=True)
+                await channel.connect(timeout=50.0, reconnect=True)
             voice_targets[ctx.guild.id] = channel.id
     except Exception:
         if voice_targets.get(ctx.guild.id) == channel.id:
