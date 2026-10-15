@@ -19,7 +19,7 @@ MAX_QUEUE = 50
 EXTRACT_TIMEOUT = 45  # ثواني
 
 # أوامر مختصرة تشتغل بدون "!"
-SHORT_COMMANDS = {"ش", "وقف", "ك", "كمل", "س", "سكب"}
+SHORT_COMMANDS = {"ش", "وقف", "ك", "كمل", "س", "سكب", "كرر"}
 
 Track = dict[str, str]
 
@@ -61,6 +61,9 @@ FFMPEG_OPTIONS_AFTER = "-vn -af volume=0.5"
 
 queues: dict[int, list[tuple[Track, discord.abc.Messageable]]] = {}
 now_playing: dict[int, Track] = {}
+repeat_guilds: set[int] = set()  # السيرفرات اللي فعّلت التكرار
+skipped_guilds: set[int] = set()  # تخطي يدوي: ما نكرر الأغنية
+last_announced: dict[int, Track] = {}
 voice_locks: dict[int, asyncio.Lock] = {}
 voice_connection_locks: dict[int, asyncio.Lock] = {}
 STATE_FILE = os.getenv("STATE_FILE", "voice_state.json")
@@ -188,11 +191,16 @@ async def play_next(guild: discord.Guild) -> None:
                 source = build_ffmpeg_source(stream)
                 now_playing[guild.id] = track
 
-                def after_play(error: Exception | None, _track: Track = track) -> None:
+                def after_play(
+                    error: Exception | None,
+                    _track: Track = track,
+                    _channel: discord.abc.Messageable = requester_channel,
+                ) -> None:
                     if error:
                         logger.error("Playback error: %s", error)
                     future = asyncio.run_coroutine_threadsafe(
-                        advance_after_track(guild, _track), bot.loop
+                        advance_after_track(guild, _track, _channel, error is None),
+                        bot.loop,
                     )
 
                     def report_failure(done: Any) -> None:
@@ -204,9 +212,12 @@ async def play_next(guild: discord.Guild) -> None:
                     future.add_done_callback(report_failure)
 
                 voice_client.play(source, after=after_play)
-                await send_safely(
-                    requester_channel, f"🎵 الآن تعمل: **{track['title']}**"
-                )
+                # ما نكرر رسالة "الآن تعمل" عند تكرار نفس الأغنية
+                if last_announced.get(guild.id) is not track:
+                    last_announced[guild.id] = track
+                    await send_safely(
+                        requester_channel, f"🎵 الآن تعمل: **{track['title']}**"
+                    )
                 return
             except Exception:
                 logger.exception("Could not play track: %s", track["title"])
@@ -220,9 +231,21 @@ async def play_next(guild: discord.Guild) -> None:
         now_playing.pop(guild.id, None)
 
 
-async def advance_after_track(guild: discord.Guild, finished_track: Track) -> None:
+async def advance_after_track(
+    guild: discord.Guild,
+    finished_track: Track,
+    requester_channel: discord.abc.Messageable,
+    finished_ok: bool,
+) -> None:
     if now_playing.get(guild.id) is finished_track:
         now_playing.pop(guild.id, None)
+
+    skipped = guild.id in skipped_guilds
+    skipped_guilds.discard(guild.id)
+    # التكرار: نرجّع الأغنية أول الطابور إذا انتهت طبيعيًا (مو تخطي ولا خطأ)
+    if guild.id in repeat_guilds and finished_ok and not skipped:
+        queues.setdefault(guild.id, []).insert(0, (finished_track, requester_channel))
+
     await play_next(guild)
 
 
@@ -469,10 +492,24 @@ async def skip_song(ctx: commands.Context) -> None:
     if not user_shares_bot_voice_channel(ctx):
         await ctx.send("يجب أن تكون في نفس الروم الصوتي مع البوت.")
     elif voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+        skipped_guilds.add(ctx.guild.id)
         voice_client.stop()
         await ctx.send("⏭️ تم تخطي الأغنية.")
     else:
         await ctx.send("ما فيه أغنية لتخطيها.")
+
+
+@bot.command(name="كرر")
+@commands.guild_only()
+async def toggle_repeat(ctx: commands.Context) -> None:
+    if not user_shares_bot_voice_channel(ctx):
+        await ctx.send("يجب أن تكون في نفس الروم الصوتي مع البوت.")
+    elif ctx.guild.id in repeat_guilds:
+        repeat_guilds.discard(ctx.guild.id)
+        await ctx.send("🔁 تم إيقاف التكرار.")
+    else:
+        repeat_guilds.add(ctx.guild.id)
+        await ctx.send("🔁 تم تفعيل التكرار: الأغنية الحالية تعيد نفسها بعد ما تنتهي.")
 
 
 @bot.command(name="طابور")
@@ -510,6 +547,9 @@ async def leave_voice(ctx: commands.Context) -> None:
     # نفرغ الطابور قبل الخروج عشان ما يبدأ البوت أغنية جديدة
     queues.pop(guild_id, None)
     now_playing.pop(guild_id, None)
+    repeat_guilds.discard(guild_id)
+    skipped_guilds.discard(guild_id)
+    last_announced.pop(guild_id, None)
     await ctx.voice_client.disconnect(force=True)
     await ctx.send("👋 خرجت من الروم الصوتي.")
 
@@ -562,9 +602,4 @@ def keep_alive() -> None:
 
 if __name__ == "__main__":
     if not TOKEN:
-        raise RuntimeError("أضف توكن البوت في Secrets باسم DISCORD_TOKEN.")
-    if shutil.which("ffmpeg") is None:
-        raise RuntimeError("FFmpeg غير موجود.")
-
-    keep_alive()
-    bot.run(TOKEN, log_handler=None)
+        raise RuntimeErro
