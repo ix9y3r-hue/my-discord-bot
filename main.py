@@ -57,13 +57,20 @@ ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
 ytdl_lock = asyncio.Lock()
 
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-FFMPEG_OPTIONS_AFTER = "-vn -af volume=0.5"
+FFMPEG_OPTIONS_AFTER = "-vn"
 
 queues: dict[int, list[tuple[Track, discord.abc.Messageable]]] = {}
 now_playing: dict[int, Track] = {}
 repeat_guilds: set[int] = set()  # السيرفرات اللي فعّلت التكرار
 skipped_guilds: set[int] = set()  # تخطي يدوي: ما نكرر الأغنية
 last_announced: dict[int, Track] = {}
+history: dict[int, list[Track]] = {}  # الأغاني اللي اشتغلت (لزر السابق)
+volumes: dict[int, float] = {}  # مستوى الصوت لكل سيرفر
+panels: dict[int, discord.Message] = {}  # لوحة التحكم الحالية لكل سيرفر
+DEFAULT_VOLUME = 0.5
+MIN_VOLUME = 0.1
+MAX_VOLUME = 1.5
+VOLUME_STEP = 0.1
 voice_locks: dict[int, asyncio.Lock] = {}
 voice_connection_locks: dict[int, asyncio.Lock] = {}
 STATE_FILE = os.getenv("STATE_FILE", "voice_state.json")
@@ -152,20 +159,236 @@ async def send_safely(channel: discord.abc.Messageable, message: str) -> None:
         logger.exception("Could not send a message to the request channel")
 
 
-def build_ffmpeg_source(stream: dict[str, Any]) -> discord.FFmpegOpusAudio:
+def build_ffmpeg_source(
+    stream: dict[str, Any], volume: float
+) -> discord.PCMVolumeTransformer:
     before = FFMPEG_BEFORE
     headers = stream.get("http_headers") or {}
     if headers:
         header_str = "".join(f"{k}: {v}\r\n" for k, v in headers.items())
         before += f" -headers {shlex.quote(header_str)}"
-    return discord.FFmpegOpusAudio(
+    source = discord.FFmpegPCMAudio(
         stream["url"],
         before_options=before,
         options=FFMPEG_OPTIONS_AFTER,
     )
+    return discord.PCMVolumeTransformer(source, volume=volume)
 
 
 # ───────────────────────── التشغيل ─────────────────────────
+
+
+# ───────────────────────── لوحة التحكم ─────────────────────────
+
+
+def format_duration(seconds: Any) -> str:
+    if not isinstance(seconds, (int, float)) or seconds <= 0:
+        return ""
+    hours, rem = divmod(int(seconds), 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def queue_text(guild_id: int) -> str:
+    queue = queues.get(guild_id, [])
+    current = now_playing.get(guild_id)
+    heading = f"🎵 تعمل الآن: **{current['title']}**\n" if current else ""
+
+    if not queue:
+        return heading or "قائمة الانتظار فارغة."
+
+    lines = [
+        f"{index}. {track['title']}"
+        for index, (track, _channel) in enumerate(queue[:15], 1)
+    ]
+    extra = f"\n… و{len(queue) - 15} أخرى" if len(queue) > 15 else ""
+    return heading + "**قائمة الانتظار:**\n" + "\n".join(lines) + extra
+
+
+async def clear_panel(guild_id: int) -> None:
+    """يشيل الأزرار من اللوحة القديمة عشان ما تبقى أزرار ميتة."""
+    message = panels.pop(guild_id, None)
+    if message:
+        try:
+            await message.edit(view=None)
+        except discord.DiscordException:
+            pass
+
+
+class PlayerView(discord.ui.View):
+    def __init__(self, guild_id: int, embed: discord.Embed) -> None:
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        self.embed = embed
+        self.repeat_button.style = (
+            discord.ButtonStyle.success
+            if guild_id in repeat_guilds
+            else discord.ButtonStyle.secondary
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        voice_client = interaction.guild.voice_client if interaction.guild else None
+        user_voice = getattr(interaction.user, "voice", None)
+        if (
+            not voice_client
+            or not user_voice
+            or user_voice.channel != voice_client.channel
+        ):
+            await interaction.response.send_message(
+                "يجب أن تكون في نفس الروم الصوتي مع البوت.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0)
+    async def previous_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        voice_client = interaction.guild.voice_client
+        current = now_playing.get(self.guild_id)
+        if not voice_client or not current:
+            await interaction.response.send_message(
+                "ما فيه أغنية تعمل حاليًا.", ephemeral=True
+            )
+            return
+
+        played = history.setdefault(self.guild_id, [])
+        if played and played[-1] is current:
+            played.pop()
+        previous = played.pop() if played else None
+
+        queue = queues.setdefault(self.guild_id, [])
+        queue.insert(0, (current, interaction.channel))
+        if previous:
+            queue.insert(0, (previous, interaction.channel))
+
+        skipped_guilds.add(self.guild_id)
+        voice_client.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.secondary, row=0)
+    async def stop_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        voice_client = interaction.guild.voice_client
+        queues.pop(self.guild_id, None)
+        repeat_guilds.discard(self.guild_id)
+        if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+            skipped_guilds.add(self.guild_id)
+            voice_client.stop()
+        await interaction.response.send_message("⏹️ تم إيقاف التشغيل ومسح الطابور.")
+
+    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.primary, row=0)
+    async def pause_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        voice_client = interaction.guild.voice_client
+        if voice_client and voice_client.is_playing():
+            voice_client.pause()
+            button.emoji = "▶️"
+        elif voice_client and voice_client.is_paused():
+            voice_client.resume()
+            button.emoji = "⏸️"
+        else:
+            await interaction.response.send_message(
+                "ما فيه أغنية تعمل حاليًا.", ephemeral=True
+            )
+            return
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
+    async def skip_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        voice_client = interaction.guild.voice_client
+        if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+            skipped_guilds.add(self.guild_id)
+            voice_client.stop()
+            await interaction.response.defer()
+        else:
+            await interaction.response.send_message(
+                "ما فيه أغنية لتخطيها.", ephemeral=True
+            )
+
+    async def _change_volume(
+        self, interaction: discord.Interaction, delta: float
+    ) -> None:
+        voice_client = interaction.guild.voice_client
+        current = volumes.get(self.guild_id, DEFAULT_VOLUME)
+        volume = round(min(MAX_VOLUME, max(MIN_VOLUME, current + delta)), 2)
+        volumes[self.guild_id] = volume
+        if voice_client and isinstance(voice_client.source, discord.PCMVolumeTransformer):
+            voice_client.source.volume = volume
+        self.embed.set_footer(text=f"🔊 مستوى الصوت: {round(volume * 100)}%")
+        await interaction.response.edit_message(embed=self.embed, view=self)
+
+    @discord.ui.button(emoji="🔉", style=discord.ButtonStyle.secondary, row=1)
+    async def volume_down_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await self._change_volume(interaction, -VOLUME_STEP)
+
+    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=1)
+    async def repeat_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self.guild_id in repeat_guilds:
+            repeat_guilds.discard(self.guild_id)
+            button.style = discord.ButtonStyle.secondary
+        else:
+            repeat_guilds.add(self.guild_id)
+            button.style = discord.ButtonStyle.success
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(emoji="📜", style=discord.ButtonStyle.secondary, row=1)
+    async def queue_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await interaction.response.send_message(
+            queue_text(self.guild_id), ephemeral=True
+        )
+
+    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=1)
+    async def volume_up_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await self._change_volume(interaction, VOLUME_STEP)
+
+
+async def show_panel(
+    guild: discord.Guild,
+    channel: discord.abc.Messageable,
+    track: Track,
+    stream: dict[str, Any],
+) -> None:
+    await clear_panel(guild.id)
+
+    volume = volumes.get(guild.id, DEFAULT_VOLUME)
+    safe_title = track["title"].replace("[", "(").replace("]", ")")
+    embed = discord.Embed(
+        title="🎧 Now Playing",
+        description=f"**[{safe_title}]({track['webpage']})**",
+        color=0x5865F2,
+    )
+    if stream.get("thumbnail"):
+        embed.set_thumbnail(url=stream["thumbnail"])
+    if stream.get("uploader"):
+        embed.add_field(name="👤 الفنان", value=str(stream["uploader"]), inline=True)
+    duration = format_duration(stream.get("duration"))
+    if duration:
+        embed.add_field(name="⏱️ المدة", value=duration, inline=True)
+    if track.get("requester"):
+        embed.add_field(name="🙋 الطالب", value=track["requester"], inline=True)
+    embed.set_footer(text=f"🔊 مستوى الصوت: {round(volume * 100)}%")
+
+    try:
+        panels[guild.id] = await channel.send(
+            embed=embed, view=PlayerView(guild.id, embed)
+        )
+    except discord.DiscordException:
+        logger.exception("Could not send the player panel")
 
 
 async def play_next(guild: discord.Guild) -> None:
@@ -181,6 +404,7 @@ async def play_next(guild: discord.Guild) -> None:
         queue = queues.setdefault(guild.id, [])
         if not queue:
             now_playing.pop(guild.id, None)
+            await clear_panel(guild.id)
             return
 
         while queue:
@@ -190,7 +414,7 @@ async def play_next(guild: discord.Guild) -> None:
                 if not stream or not stream.get("url"):
                     raise ValueError("لم أتمكن من الحصول على رابط البث.")
 
-                source = build_ffmpeg_source(stream)
+                source = build_ffmpeg_source(stream, volumes.get(guild.id, DEFAULT_VOLUME))
                 now_playing[guild.id] = track
 
                 def after_play(
@@ -215,11 +439,13 @@ async def play_next(guild: discord.Guild) -> None:
 
                 voice_client.play(source, after=after_play)
                 # ما نكرر رسالة "الآن تعمل" عند تكرار نفس الأغنية
+                played = history.setdefault(guild.id, [])
+                if not played or played[-1] is not track:
+                    played.append(track)
+                    del played[:-20]
                 if last_announced.get(guild.id) is not track:
                     last_announced[guild.id] = track
-                    await send_safely(
-                        requester_channel, f"🎵 الآن تعمل: **{track['title']}**"
-                    )
+                    await show_panel(guild, requester_channel, track, stream)
                 return
             except Exception:
                 logger.exception("Could not play track: %s", track["title"])
@@ -231,6 +457,7 @@ async def play_next(guild: discord.Guild) -> None:
                 )
 
         now_playing.pop(guild.id, None)
+        await clear_panel(guild.id)
 
 
 async def advance_after_track(
@@ -454,6 +681,7 @@ async def play_song(ctx: commands.Context, *, search: str | None = None) -> None
         await ctx.send("صار خطأ أثناء البحث، جرّب مرة ثانية.")
         return
 
+    track["requester"] = ctx.author.display_name
     queues.setdefault(ctx.guild.id, []).append((track, ctx.channel))
     if voice_client.is_playing() or voice_client.is_paused():
         await ctx.send(f"➕ أُضيفت إلى الطابور: **{track['title']}**")
@@ -517,20 +745,7 @@ async def toggle_repeat(ctx: commands.Context) -> None:
 @bot.command(name="طابور")
 @commands.guild_only()
 async def show_queue(ctx: commands.Context) -> None:
-    queue = queues.get(ctx.guild.id, [])
-    current = now_playing.get(ctx.guild.id)
-    heading = f"🎵 تعمل الآن: **{current['title']}**\n" if current else ""
-
-    if not queue:
-        await ctx.send(heading or "قائمة الانتظار فارغة.")
-        return
-
-    lines = [
-        f"{index}. {track['title']}"
-        for index, (track, _channel) in enumerate(queue[:15], 1)
-    ]
-    extra = f"\n… و{len(queue) - 15} أخرى" if len(queue) > 15 else ""
-    await ctx.send(heading + "**قائمة الانتظار:**\n" + "\n".join(lines) + extra)
+    await ctx.send(queue_text(ctx.guild.id))
 
 
 @bot.command(name="اخرج")
@@ -552,6 +767,8 @@ async def leave_voice(ctx: commands.Context) -> None:
     repeat_guilds.discard(guild_id)
     skipped_guilds.discard(guild_id)
     last_announced.pop(guild_id, None)
+    history.pop(guild_id, None)
+    await clear_panel(guild_id)
     await ctx.voice_client.disconnect(force=True)
     await ctx.send("👋 خرجت من الروم الصوتي.")
 
