@@ -104,6 +104,7 @@ def load_voice_stats() -> dict[int, dict[str, Any]]:
                 "period_start": float(value.get("period_start", time.time())),
                 "last_tick": float(value.get("last_tick", time.time())),
                 "last_report": float(value.get("last_report", value.get("period_start", time.time()))),
+                "message_ids": [int(mid) for mid in value.get("message_ids", []) if str(mid).isdigit()],
                 "seconds": {str(k): max(0.0, float(v)) for k, v in value.get("seconds", {}).items()},
             }
         return result
@@ -181,7 +182,10 @@ async def publish_weekly_stats(guild: discord.Guild, record: dict[str, Any]) -> 
 
     period_start = float(record.get("period_start", time.time()))
     period_end = period_start + STATS_WEEK_SECONDS
-    for page, chunk in enumerate(chunks or ["لا توجد رومات صوتية مسجلة."], 1):
+    message_ids = list(record.get("message_ids", []))
+    new_message_ids: list[int] = []
+    for index, chunk in enumerate(chunks or ["لا توجد رومات صوتية مسجلة."]):
+        page = index + 1
         embed = discord.Embed(
             title="إحصائيات نشاط الرومات الصوتية" if page == 1 else f"ترتيب الرومات الصوتية — صفحة {page}",
             description=chunk,
@@ -190,12 +194,31 @@ async def publish_weekly_stats(guild: discord.Guild, record: dict[str, Any]) -> 
         )
         if page == 1:
             embed.add_field(name="إجمالي نشاط الرومات", value=format_activity(total_seconds), inline=False)
-            embed.set_footer(text="تحديث القائمة كل 30 دقيقة • تصفير الإحصائيات كل 7 أيام")
+            embed.set_footer(text="تحديث القائمة كل 10 دقائق • تصفير الإحصائيات كل 7 أيام")
         try:
-            await target.send(embed=embed)
+            message = None
+            if index < len(message_ids):
+                try:
+                    message = await target.fetch_message(int(message_ids[index]))
+                    await message.edit(embed=embed)
+                except discord.NotFound:
+                    message = None
+            if message is None:
+                message = await target.send(embed=embed)
+            new_message_ids.append(message.id)
         except discord.DiscordException:
-            logger.exception("Could not publish weekly voice stats")
+            logger.exception("Could not publish voice stats")
             return
+
+    # Remove obsolete extra pages if the ranking now needs fewer messages.
+    for stale_id in message_ids[len(new_message_ids):]:
+        try:
+            stale = await target.fetch_message(int(stale_id))
+            await stale.delete()
+        except discord.DiscordException:
+            pass
+    record["message_ids"] = new_message_ids
+    save_voice_stats()
 
 
 def set_target(guild_id: int, channel_id: int | None) -> None:
@@ -787,6 +810,7 @@ async def setup_voice_stats(ctx: commands.Context) -> None:
             "period_start": now,
             "last_tick": now,
             "last_report": now,
+            "message_ids": [],
             "seconds": {},
         }
         voice_stats[ctx.guild.id] = record
@@ -801,11 +825,11 @@ async def setup_voice_stats(ctx: commands.Context) -> None:
         title="تم تفعيل إحصائيات الرومات الصوتية",
         description=(
             "بدأ حساب مدة وجود الأعضاء في جميع الرومات الصوتية، حتى لو كانوا صامتين.\n"
-            "سيتم تحديث ترتيب الرومات كل 30 دقيقة، وتصفير الإحصائيات وبدء أسبوع جديد كل 7 أيام في هذا الشات."
+            "سيتم تحديث ترتيب الرومات كل 10 دقائق، وتصفير الإحصائيات وبدء أسبوع جديد كل 7 أيام في هذا الشات."
         ),
         color=0x57F287,
     )
-    embed.add_field(name="تحديث القائمة", value="كل 30 دقيقة", inline=True)
+    embed.add_field(name="تحديث القائمة", value="كل 10 دقائق", inline=True)
     embed.add_field(name="تصفير الإحصائيات", value="كل 7 أيام", inline=True)
     embed.add_field(name="طريقة الحساب", value="وجود عضو واحد على الأقل في الروم", inline=True)
     await ctx.send(embed=embed)
