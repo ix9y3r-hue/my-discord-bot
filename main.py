@@ -866,18 +866,18 @@ class RoleCreateModal(discord.ui.Modal, title="إنشاء رتبتك الخاص�
             )
             return
 
-        # Members with Administrator are allowed to create a role, but their new
-        # role must sit immediately below their highest Administrator role.
-        admin_roles = [role for role in member.roles if role.permissions.administrator]
-        if admin_roles:
-            protected_role = max(admin_roles, key=lambda role: role.position)
-            target_position = protected_role.position - 1
+        # الرتبة الجديدة تكون فوق أعلى رتبة مع العضو مباشرة،
+        # إلا إذا كانت أعلى رتبة معه فيها Administrator فتكون تحتها مباشرة.
+        top_role = member.top_role
+        if top_role.permissions.administrator:
+            # position = موقع رتبة الإدارة: الرتبة الجديدة تأخذ مكانها وتُدفع رتبة الإدارة للأعلى
+            target_position = top_role.position
         else:
-            target_position = member.top_role.position + 1
+            target_position = top_role.position + 1
 
         if target_position < 1 or bot_member.top_role.position <= target_position:
             await interaction.response.send_message(
-                "ما أقدر أرتب الرتبة بالمكان المطلوب. ارفع رتبة البوت فوق رتبتك أو فوق رتبة Administrator التي عندك، ثم جرّب مرة ثانية.",
+                "ما أقدر أرتب الرتبة بالمكان المطلوب. ارفع رتبة البوت فوق أعلى رتبة عندك، ثم جرّب مرة ثانية.",
                 ephemeral=True,
             )
             return
@@ -980,11 +980,7 @@ async def setup_role_panel(interaction: discord.Interaction) -> None:
         return
     embed = discord.Embed(
         title="إنشاء رتبة خاصة",
-        description=(
-            "اضغط الزر ثم اكتب اسم الرتبة ولونها بصيغة HEX مثل `#5865F2`.\n"
-            "سيتم إنشاء رتبتك فوق أعلى رتبة لديك، وإذا عندك رتبة Administrator فستكون رتبتك الجديدة تحتها.\n"
-            "إذا أنشأت رتبة ثانية، ستُزال رتبتك السابقة ويُحذف دورها القديم من السيرفر متى سمحت صلاحيات البوت."
-        ),
+        description="اضغط الزر واكتب اسم رتبتك ولونها مثل `#5865F2`.",
         color=0x5865F2,
     )
     await interaction.response.send_message(embed=embed, view=RolePanelView())
