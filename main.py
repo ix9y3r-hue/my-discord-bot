@@ -77,6 +77,7 @@ VOLUME_STEP = 0.1
 voice_locks: dict[int, asyncio.Lock] = {}
 voice_connection_locks: dict[int, asyncio.Lock] = {}
 STATE_FILE = os.getenv("STATE_FILE", "voice_state.json")
+ROLE_OWNERS_FILE = os.getenv("ROLE_OWNERS_FILE", "created_roles.json")
 
 
 def load_targets() -> dict[int, int]:
@@ -88,6 +89,37 @@ def load_targets() -> dict[int, int]:
 
 
 voice_targets: dict[int, int] = load_targets()
+
+
+def load_created_roles() -> dict[int, dict[int, int]]:
+    try:
+        with open(ROLE_OWNERS_FILE, encoding="utf-8") as f:
+            raw = json.load(f)
+        return {
+            int(guild_id): {int(user_id): int(role_id) for user_id, role_id in users.items()}
+            for guild_id, users in raw.items()
+            if isinstance(users, dict)
+        }
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def save_created_roles() -> None:
+    try:
+        temp_path = f"{ROLE_OWNERS_FILE}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {str(guild_id): {str(user_id): role_id for user_id, role_id in users.items()}
+                 for guild_id, users in created_roles.items()},
+                f,
+                ensure_ascii=False,
+            )
+        os.replace(temp_path, ROLE_OWNERS_FILE)
+    except OSError:
+        logger.exception("Could not save created role ownership")
+
+
+created_roles: dict[int, dict[int, int]] = load_created_roles()
 
 
 def load_voice_stats() -> dict[int, dict[str, Any]]:
@@ -731,6 +763,9 @@ async def before_voice_stats_watchdog() -> None:
 @bot.event
 async def on_ready() -> None:
     logger.info("تم تسجيل الدخول باسم %s", bot.user)
+    if not getattr(bot, "_role_panel_view_registered", False):
+        bot.add_view(RolePanelView())
+        bot._role_panel_view_registered = True
     try:
         synced = await bot.tree.sync()
         logger.info("تم مزامنة %s من أوامر السلاش", len(synced))
@@ -793,6 +828,166 @@ async def on_voice_state_update(
     if target_id is None or (after.channel and after.channel.id == target_id):
         return
     ensure_reconnect(guild_id)
+
+
+class RoleCreateModal(discord.ui.Modal, title="إنشاء رتبتك الخاصة"):
+    role_name = discord.ui.TextInput(
+        label="اسم الرتبة",
+        placeholder="اكتب اسم الرتبة",
+        min_length=1,
+        max_length=100,
+        required=True,
+    )
+    role_color = discord.ui.TextInput(
+        label="لون الرتبة (HEX)",
+        placeholder="#5865F2",
+        min_length=6,
+        max_length=7,
+        required=True,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        member = interaction.user
+        if guild is None or not isinstance(member, discord.Member):
+            await interaction.response.send_message("هذا الزر يعمل داخل السيرفر فقط.", ephemeral=True)
+            return
+
+        bot_member = guild.me
+        if bot_member is None or not bot_member.guild_permissions.manage_roles:
+            await interaction.response.send_message(
+                "البوت يحتاج صلاحية **Manage Roles (إدارة الرتب)**.", ephemeral=True
+            )
+            return
+
+        if member.id == guild.owner_id:
+            await interaction.response.send_message(
+                "ما أقدر أنشئ رتبة أعلى من مالك السيرفر.", ephemeral=True
+            )
+            return
+
+        # Members with Administrator are allowed to create a role, but their new
+        # role must sit immediately below their highest Administrator role.
+        admin_roles = [role for role in member.roles if role.permissions.administrator]
+        if admin_roles:
+            protected_role = max(admin_roles, key=lambda role: role.position)
+            target_position = protected_role.position - 1
+        else:
+            target_position = member.top_role.position + 1
+
+        if target_position < 1 or bot_member.top_role.position <= target_position:
+            await interaction.response.send_message(
+                "ما أقدر أرتب الرتبة بالمكان المطلوب. ارفع رتبة البوت فوق رتبتك أو فوق رتبة Administrator التي عندك، ثم جرّب مرة ثانية.",
+                ephemeral=True,
+            )
+            return
+
+        name = str(self.role_name.value).strip()
+        color_text = str(self.role_color.value).strip().removeprefix("#")
+        if len(color_text) != 6 or any(ch not in "0123456789abcdefABCDEF" for ch in color_text):
+            await interaction.response.send_message(
+                "اللون غير صحيح. اكتب لون HEX مثل `#5865F2`.", ephemeral=True
+            )
+            return
+        if not name:
+            await interaction.response.send_message("اكتب اسمًا للرتبة.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        new_role: discord.Role | None = None
+        try:
+            new_role = await guild.create_role(
+                name=name,
+                colour=discord.Colour(int(color_text, 16)),
+                permissions=discord.Permissions.none(),
+                mentionable=False,
+                hoist=False,
+                reason=f"Self-service role requested by {member} ({member.id})",
+            )
+            await new_role.edit(
+                position=target_position,
+                reason="Place self-service role according to member's Administrator role hierarchy",
+            )
+            await member.add_roles(new_role, reason="Self-service role creation")
+
+            guild_owners = created_roles.setdefault(guild.id, {})
+            previous_id = guild_owners.get(member.id)
+            if previous_id and previous_id != new_role.id:
+                previous_role = guild.get_role(previous_id)
+                if previous_role is not None:
+                    try:
+                        await member.remove_roles(previous_role, reason="Replacing previous self-service role")
+                    except discord.DiscordException:
+                        logger.warning("Could not remove previous self-service role %s", previous_role.id)
+                    # Never delete an Administrator role or a managed/integration role.
+                    if not previous_role.managed and not previous_role.permissions.administrator:
+                        try:
+                            await previous_role.delete(reason="Replaced by a newer self-service role")
+                        except discord.DiscordException:
+                            logger.warning("Could not delete previous self-service role %s", previous_role.id)
+            guild_owners[member.id] = new_role.id
+            save_created_roles()
+            await interaction.followup.send(
+                f"تم إنشاء {new_role.mention} وإعطاؤها لك. إذا أنشأت رتبة جديدة لاحقًا، ستُستبدل رتبتك السابقة.",
+                ephemeral=True,
+            )
+        except discord.Forbidden:
+            if new_role is not None:
+                try:
+                    await new_role.delete(reason="Cleanup after failed self-service role creation")
+                except discord.DiscordException:
+                    pass
+            await interaction.followup.send(
+                "ما قدرت أنشئ الرتبة أو أرتبها. تأكد أن رتبة البوت أعلى من رتبتك وأعلى من الرتب التي يحاول إدارتها.",
+                ephemeral=True,
+            )
+        except discord.DiscordException:
+            logger.exception("Failed to create self-service role for %s", member.id)
+            if new_role is not None and new_role not in member.roles:
+                try:
+                    await new_role.delete(reason="Cleanup after failed self-service role creation")
+                except discord.DiscordException:
+                    pass
+            await interaction.followup.send("صار خطأ أثناء إنشاء الرتبة. تأكد من صلاحيات البوت وحاول مرة ثانية.", ephemeral=True)
+
+
+class RolePanelView(discord.ui.View):
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="إنشاء رتبة",
+        style=discord.ButtonStyle.primary,
+        custom_id="self_service_role:create",
+    )
+    async def create_role_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await interaction.response.send_modal(RoleCreateModal())
+
+
+@bot.tree.command(name="setup_role", description="إعداد لوحة إنشاء الرتب في هذه القناة")
+@discord.app_commands.guild_only()
+@discord.app_commands.default_permissions(manage_guild=True)
+async def setup_role_panel(interaction: discord.Interaction) -> None:
+    if not interaction.guild:
+        await interaction.response.send_message("هذا الأمر داخل السيرفر فقط.", ephemeral=True)
+        return
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "تحتاج صلاحية إدارة السيرفر لاستخدام هذا الأمر.", ephemeral=True
+        )
+        return
+    embed = discord.Embed(
+        title="إنشاء رتبة خاصة",
+        description=(
+            "اضغط الزر ثم اكتب اسم الرتبة ولونها بصيغة HEX مثل `#5865F2`.\n"
+            "سيتم إنشاء رتبتك فوق أعلى رتبة لديك، وإذا عندك رتبة Administrator فستكون رتبتك الجديدة تحتها.\n"
+            "إذا أنشأت رتبة ثانية، ستُزال رتبتك السابقة ويُحذف دورها القديم من السيرفر متى سمحت صلاحيات البوت."
+        ),
+        color=0x5865F2,
+    )
+    await interaction.response.send_message(embed=embed, view=RolePanelView())
 
 
 @bot.tree.command(name="setup", description="تفعيل إحصائيات الرومات الصوتية في هذه القناة")
