@@ -16,7 +16,6 @@ from flask import Flask
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIX = "!"
-SETUP_PREFIX = "٪"
 STATS_FILE = os.getenv("VOICE_STATS_FILE", "voice_stats.json")
 STATS_WEEK_SECONDS = 7 * 24 * 60 * 60
 STATS_UPDATE_SECONDS = 10 * 60
@@ -32,8 +31,8 @@ def get_command_prefix(_bot: commands.Bot, message: discord.Message) -> str | li
     parts = message.content.strip().split(maxsplit=1)
     if parts and parts[0] in SHORT_COMMANDS:
         return ""
-    # Keep existing ! commands and also allow the dedicated ٪Setup command.
-    return [PREFIX, SETUP_PREFIX]
+    # Keep existing ! prefix commands; setup is registered as a Discord slash command.
+    return PREFIX
 
 
 logging.basicConfig(
@@ -732,6 +731,11 @@ async def before_voice_stats_watchdog() -> None:
 @bot.event
 async def on_ready() -> None:
     logger.info("تم تسجيل الدخول باسم %s", bot.user)
+    try:
+        synced = await bot.tree.sync()
+        logger.info("تم مزامنة %s من أوامر السلاش", len(synced))
+    except Exception:
+        logger.exception("تعذرت مزامنة أوامر السلاش")
     env_channel = os.getenv("VOICE_CHANNEL_ID")
     if env_channel and env_channel.isdigit():
         channel = bot.get_channel(int(env_channel))
@@ -791,33 +795,39 @@ async def on_voice_state_update(
     ensure_reconnect(guild_id)
 
 
-@bot.command(name="Setup", aliases=["setup"])
-@commands.guild_only()
-@commands.has_guild_permissions(manage_guild=True)
-async def setup_voice_stats(ctx: commands.Context) -> None:
+@bot.tree.command(name="setup", description="تفعيل إحصائيات الرومات الصوتية في هذه القناة")
+@discord.app_commands.guild_only()
+@discord.app_commands.default_permissions(manage_guild=True)
+async def setup_voice_stats(interaction: discord.Interaction) -> None:
     """Set the text channel where weekly voice activity rankings are posted."""
-    if not isinstance(ctx.channel, discord.TextChannel):
-        await ctx.send("اكتب الأمر داخل شات نصي في السيرفر.")
+    if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("اكتب الأمر داخل شات نصي في السيرفر.", ephemeral=True)
+        return
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "تحتاج صلاحية **إدارة السيرفر (Manage Server)** لاستخدام هذا الأمر.",
+            ephemeral=True,
+        )
         return
 
     now = time.time()
-    record = voice_stats.get(ctx.guild.id)
+    record = voice_stats.get(interaction.guild.id)
     if not record or not record.get("channel_id"):
         record = {
-            "channel_id": ctx.channel.id,
+            "channel_id": interaction.channel.id,
             "period_start": now,
             "last_tick": now,
             "last_report": now,
             "message_ids": [],
             "seconds": {},
         }
-        voice_stats[ctx.guild.id] = record
+        voice_stats[interaction.guild.id] = record
     else:
         # Changing the report channel keeps the current week's accumulated totals.
-        record["channel_id"] = ctx.channel.id
+        record["channel_id"] = interaction.channel.id
         record["last_tick"] = now
 
-    stats_active_channels[ctx.guild.id] = active_human_voice_channels(ctx.guild)
+    stats_active_channels[interaction.guild.id] = active_human_voice_channels(interaction.guild)
     save_voice_stats()
     embed = discord.Embed(
         title="تم تفعيل إحصائيات الرومات الصوتية",
@@ -830,7 +840,7 @@ async def setup_voice_stats(ctx: commands.Context) -> None:
     embed.add_field(name="تحديث القائمة", value="كل 10 دقائق", inline=True)
     embed.add_field(name="تصفير الإحصائيات", value="كل 7 أيام", inline=True)
     embed.add_field(name="طريقة الحساب", value="وجود عضو واحد على الأقل في الروم", inline=True)
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.command(name="ادخل")
