@@ -19,6 +19,7 @@ PREFIX = "!"
 SETUP_PREFIX = "٪"
 STATS_FILE = os.getenv("VOICE_STATS_FILE", "voice_stats.json")
 STATS_WEEK_SECONDS = 7 * 24 * 60 * 60
+STATS_UPDATE_SECONDS = 30 * 60
 MAX_QUEUE = 50
 EXTRACT_TIMEOUT = 45
 
@@ -102,6 +103,7 @@ def load_voice_stats() -> dict[int, dict[str, Any]]:
                 "channel_id": int(value["channel_id"]) if value.get("channel_id") else None,
                 "period_start": float(value.get("period_start", time.time())),
                 "last_tick": float(value.get("last_tick", time.time())),
+                "last_report": float(value.get("last_report", value.get("period_start", time.time()))),
                 "seconds": {str(k): max(0.0, float(v)) for k, v in value.get("seconds", {}).items()},
             }
         return result
@@ -181,14 +183,14 @@ async def publish_weekly_stats(guild: discord.Guild, record: dict[str, Any]) -> 
     period_end = period_start + STATS_WEEK_SECONDS
     for page, chunk in enumerate(chunks or ["لا توجد رومات صوتية مسجلة."], 1):
         embed = discord.Embed(
-            title="إحصائيات الرومات الصوتية الأسبوعية" if page == 1 else f"ترتيب الرومات الصوتية — صفحة {page}",
+            title="إحصائيات نشاط الرومات الصوتية" if page == 1 else f"ترتيب الرومات الصوتية — صفحة {page}",
             description=chunk,
             color=0x5865F2,
             timestamp=discord.utils.utcnow(),
         )
         if page == 1:
             embed.add_field(name="إجمالي نشاط الرومات", value=format_activity(total_seconds), inline=False)
-            embed.set_footer(text="يتم تحديث الترتيب كل 7 أيام")
+            embed.set_footer(text="تحديث القائمة كل 30 دقيقة • تصفير الإحصائيات كل 7 أيام")
         try:
             await target.send(embed=embed)
         except discord.DiscordException:
@@ -670,31 +672,36 @@ async def voice_stats_watchdog() -> None:
 
         period_start = float(record.get("period_start", now))
         last_tick = float(record.get("last_tick", now))
+        last_report = float(record.get("last_report", period_start))
         active_before = stats_active_channels.get(guild.id, active_human_voice_channels(guild))
         deadline = period_start + STATS_WEEK_SECONDS
 
+        # Count activity only up to the end of the current 7-day period.
+        tick_end = min(now, deadline)
+        elapsed = max(0.0, tick_end - last_tick)
+        seconds = record.setdefault("seconds", {})
+        for voice_channel_id in active_before:
+            key = str(voice_channel_id)
+            seconds[key] = float(seconds.get(key, 0.0)) + elapsed
+
         if now >= deadline:
-            # Only count up to the weekly boundary, not beyond it.
-            elapsed = max(0.0, min(now, deadline) - last_tick)
-            for voice_channel_id in active_before:
-                key = str(voice_channel_id)
-                record.setdefault("seconds", {})[key] = float(record.setdefault("seconds", {}).get(key, 0.0)) + elapsed
+            # Publish the completed week's ranking, then start a clean 7-day period.
             await publish_weekly_stats(guild, record)
             record["seconds"] = {}
             record["period_start"] = now
             record["last_tick"] = now
+            record["last_report"] = now
             stats_active_channels[guild.id] = active_human_voice_channels(guild)
         else:
-            elapsed = max(0.0, now - last_tick)
-            seconds = record.setdefault("seconds", {})
-            for voice_channel_id in active_before:
-                key = str(voice_channel_id)
-                seconds[key] = float(seconds.get(key, 0.0)) + elapsed
             record["last_tick"] = now
             stats_active_channels[guild.id] = active_human_voice_channels(guild)
 
-    save_voice_stats()
+            # Refresh the ranking every 30 minutes without resetting the weekly totals.
+            if now - last_report >= STATS_UPDATE_SECONDS:
+                await publish_weekly_stats(guild, record)
+                record["last_report"] = now
 
+    save_voice_stats()
 
 @voice_stats_watchdog.before_loop
 async def before_voice_stats_watchdog() -> None:
@@ -779,6 +786,7 @@ async def setup_voice_stats(ctx: commands.Context) -> None:
             "channel_id": ctx.channel.id,
             "period_start": now,
             "last_tick": now,
+            "last_report": now,
             "seconds": {},
         }
         voice_stats[ctx.guild.id] = record
@@ -793,11 +801,12 @@ async def setup_voice_stats(ctx: commands.Context) -> None:
         title="تم تفعيل إحصائيات الرومات الصوتية",
         description=(
             "بدأ حساب مدة وجود الأعضاء في جميع الرومات الصوتية، حتى لو كانوا صامتين.\n"
-            "سيظهر ترتيب الرومات من الأكثر نشاطًا إلى الأقل كل 7 أيام في هذا الشات."
+            "سيتم تحديث ترتيب الرومات كل 30 دقيقة، وتصفير الإحصائيات وبدء أسبوع جديد كل 7 أيام في هذا الشات."
         ),
         color=0x57F287,
     )
-    embed.add_field(name="موعد التحديث", value="كل 7 أيام", inline=True)
+    embed.add_field(name="تحديث القائمة", value="كل 30 دقيقة", inline=True)
+    embed.add_field(name="تصفير الإحصائيات", value="كل 7 أيام", inline=True)
     embed.add_field(name="طريقة الحساب", value="وجود عضو واحد على الأقل في الروم", inline=True)
     await ctx.send(embed=embed)
 
