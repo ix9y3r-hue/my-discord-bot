@@ -155,63 +155,61 @@ async def publish_weekly_stats(guild: discord.Guild, record: dict[str, Any]) -> 
         if isinstance(channel, (discord.VoiceChannel, discord.StageChannel))
     } | {int(k) for k in totals}
     ranked = sorted(
-        ((channel_id, totals.get(str(channel_id), 0.0)) for channel_id in channel_ids),
-        key=lambda item: item[1], reverse=True
-    )
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        ((voice_channel_id, totals.get(str(voice_channel_id), 0.0)) for voice_channel_id in channel_ids),
+        key=lambda item: item[1],
+        reverse=True,
+    )[:3]
+
+    medals = {1: "🎖️", 2: "🥈", 3: "🥉"}
+    rank_names = {1: "المركز الأول", 2: "المركز الثاني", 3: "المركز الثالث"}
     lines: list[str] = []
     for rank, (voice_channel_id, seconds) in enumerate(ranked, 1):
         voice_channel = guild.get_channel(voice_channel_id)
-        name = voice_channel.mention if voice_channel else f"روم محذوف ({voice_channel_id})"
-        marker = medals.get(rank, f"**{rank}.**")
-        lines.append(f"{marker} {name} — **{format_activity(seconds)}**")
+        name = voice_channel.name if voice_channel else f"روم محذوف ({voice_channel_id})"
+        lines.append(
+            f"## {medals[rank]} {rank_names[rank]}\n"
+            f"# 🔊 {name}\n"
+            f"**⏱️ مدة النشاط: {format_activity(seconds)}**"
+        )
 
+    # إجمالي نشاط كل الرومات، وليس أفضل ثلاثة فقط.
     total_seconds = sum(totals.values())
-    description = "\n".join(lines) if lines else "لا توجد رومات صوتية مسجلة."
-    # Discord embed descriptions have a 4096-character limit; split long rankings safely.
-    chunks: list[str] = []
-    current = ""
-    for line in description.split("\n"):
-        if len(current) + len(line) + 1 > 3800 and current:
-            chunks.append(current)
-            current = line
-        else:
-            current = f"{current}\n{line}" if current else line
-    if current:
-        chunks.append(current)
+    description = "\n\n━━━━━━━━━━━━━━━━━━━━\n\n".join(lines) if lines else "## لا توجد رومات صوتية مسجلة."
 
     period_start = float(record.get("period_start", time.time()))
     period_end = period_start + STATS_WEEK_SECONDS
     message_ids = list(record.get("message_ids", []))
-    new_message_ids: list[int] = []
-    for index, chunk in enumerate(chunks or ["لا توجد رومات صوتية مسجلة."]):
-        page = index + 1
-        embed = discord.Embed(
-            title="إحصائيات نشاط الرومات الصوتية" if page == 1 else f"ترتيب الرومات الصوتية — صفحة {page}",
-            description=chunk,
-            color=0x5865F2,
-            timestamp=discord.utils.utcnow(),
-        )
-        if page == 1:
-            embed.add_field(name="إجمالي نشاط الرومات", value=format_activity(total_seconds), inline=False)
-            embed.set_footer(text="تحديث القائمة كل 10 دقائق • تصفير الإحصائيات كل 7 أيام")
-        try:
-            message = None
-            if index < len(message_ids):
-                try:
-                    message = await target.fetch_message(int(message_ids[index]))
-                    await message.edit(embed=embed)
-                except discord.NotFound:
-                    message = None
-            if message is None:
-                message = await target.send(embed=embed)
-            new_message_ids.append(message.id)
-        except discord.DiscordException:
-            logger.exception("Could not publish voice stats")
-            return
+    embed = discord.Embed(
+        title="🏆 أفضل 3 رومات صوتية نشاطًا",
+        description=description,
+        color=0x5865F2,
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(
+        name="📊 إجمالي نشاط جميع الرومات",
+        value=f"# {format_activity(total_seconds)}",
+        inline=False,
+    )
+    embed.set_footer(text="تحديث الترتيب كل 10 دقائق • تصفير الإحصائيات كل 7 أيام")
 
-    # Remove obsolete extra pages if the ranking now needs fewer messages.
-    for stale_id in message_ids[len(new_message_ids):]:
+    new_message_ids: list[int] = []
+    try:
+        message = None
+        if message_ids:
+            try:
+                message = await target.fetch_message(int(message_ids[0]))
+                await message.edit(embed=embed)
+            except discord.NotFound:
+                message = None
+        if message is None:
+            message = await target.send(embed=embed)
+        new_message_ids.append(message.id)
+    except discord.DiscordException:
+        logger.exception("Could not publish voice stats")
+        return
+
+    # Remove extra pages created by an older version, if any.
+    for stale_id in message_ids[1:]:
         try:
             stale = await target.fetch_message(int(stale_id))
             await stale.delete()
@@ -719,7 +717,7 @@ async def voice_stats_watchdog() -> None:
             record["last_tick"] = now
             stats_active_channels[guild.id] = active_human_voice_channels(guild)
 
-            # Refresh the ranking every 30 minutes without resetting the weekly totals.
+            # Refresh the top-three ranking every 10 minutes without resetting the weekly totals.
             if now - last_report >= STATS_UPDATE_SECONDS:
                 await publish_weekly_stats(guild, record)
                 record["last_report"] = now
