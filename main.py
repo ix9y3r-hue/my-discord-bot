@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 import logging
 import os
 import shlex
@@ -15,6 +16,9 @@ from flask import Flask
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIX = "!"
+SETUP_PREFIX = "٪"
+STATS_FILE = os.getenv("VOICE_STATS_FILE", "voice_stats.json")
+STATS_WEEK_SECONDS = 7 * 24 * 60 * 60
 MAX_QUEUE = 50
 EXTRACT_TIMEOUT = 45
 
@@ -23,11 +27,12 @@ SHORT_COMMANDS = {"ش", "وقف", "ك", "كمل", "س", "سكب", "كرر"}
 Track = dict[str, str]
 
 
-def get_command_prefix(_bot: commands.Bot, message: discord.Message) -> str:
+def get_command_prefix(_bot: commands.Bot, message: discord.Message) -> str | list[str]:
     parts = message.content.strip().split(maxsplit=1)
     if parts and parts[0] in SHORT_COMMANDS:
         return ""
-    return PREFIX
+    # Keep existing ! commands and also allow the dedicated ٪Setup command.
+    return [PREFIX, SETUP_PREFIX]
 
 
 logging.basicConfig(
@@ -83,6 +88,112 @@ def load_targets() -> dict[int, int]:
 
 
 voice_targets: dict[int, int] = load_targets()
+
+
+def load_voice_stats() -> dict[int, dict[str, Any]]:
+    try:
+        with open(STATS_FILE, encoding="utf-8") as f:
+            raw = json.load(f)
+        result: dict[int, dict[str, Any]] = {}
+        for guild_key, value in raw.items():
+            if not isinstance(value, dict):
+                continue
+            result[int(guild_key)] = {
+                "channel_id": int(value["channel_id"]) if value.get("channel_id") else None,
+                "period_start": float(value.get("period_start", time.time())),
+                "last_tick": float(value.get("last_tick", time.time())),
+                "seconds": {str(k): max(0.0, float(v)) for k, v in value.get("seconds", {}).items()},
+            }
+        return result
+    except (OSError, ValueError, TypeError, KeyError):
+        return {}
+
+
+def save_voice_stats() -> None:
+    try:
+        temp_path = f"{STATS_FILE}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump({str(k): v for k, v in voice_stats.items()}, f, ensure_ascii=False)
+        os.replace(temp_path, STATS_FILE)
+    except OSError:
+        logger.exception("Could not save voice activity stats")
+
+
+voice_stats: dict[int, dict[str, Any]] = load_voice_stats()
+stats_active_channels: dict[int, set[int]] = {}
+
+
+def active_human_voice_channels(guild: discord.Guild) -> set[int]:
+    """Return voice/stage channels with at least one non-bot member."""
+    active: set[int] = set()
+    for channel in guild.channels:
+        if isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+            if any(not member.bot for member in channel.members):
+                active.add(channel.id)
+    return active
+
+
+def format_activity(seconds: float) -> str:
+    total_minutes = max(0, int(seconds // 60))
+    hours, minutes = divmod(total_minutes, 60)
+    return f"{hours} ساعة و{minutes} دقيقة"
+
+
+async def publish_weekly_stats(guild: discord.Guild, record: dict[str, Any]) -> None:
+    channel_id = record.get("channel_id")
+    target = guild.get_channel(int(channel_id)) if channel_id else None
+    if not isinstance(target, discord.TextChannel):
+        logger.warning("Weekly voice stats channel is missing for guild %s", guild.id)
+        return
+
+    totals = {str(k): float(v) for k, v in record.get("seconds", {}).items()}
+    channel_ids = {
+        channel.id for channel in guild.channels
+        if isinstance(channel, (discord.VoiceChannel, discord.StageChannel))
+    } | {int(k) for k in totals}
+    ranked = sorted(
+        ((channel_id, totals.get(str(channel_id), 0.0)) for channel_id in channel_ids),
+        key=lambda item: item[1], reverse=True
+    )
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    lines: list[str] = []
+    for rank, (voice_channel_id, seconds) in enumerate(ranked, 1):
+        voice_channel = guild.get_channel(voice_channel_id)
+        name = voice_channel.mention if voice_channel else f"روم محذوف ({voice_channel_id})"
+        marker = medals.get(rank, f"**{rank}.**")
+        lines.append(f"{marker} {name} — **{format_activity(seconds)}**")
+
+    total_seconds = sum(totals.values())
+    description = "\n".join(lines) if lines else "لا توجد رومات صوتية مسجلة."
+    # Discord embed descriptions have a 4096-character limit; split long rankings safely.
+    chunks: list[str] = []
+    current = ""
+    for line in description.split("\n"):
+        if len(current) + len(line) + 1 > 3800 and current:
+            chunks.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        chunks.append(current)
+
+    period_start = float(record.get("period_start", time.time()))
+    period_end = period_start + STATS_WEEK_SECONDS
+    for page, chunk in enumerate(chunks or ["لا توجد رومات صوتية مسجلة."], 1):
+        embed = discord.Embed(
+            title="إحصائيات الرومات الصوتية الأسبوعية" if page == 1 else f"ترتيب الرومات الصوتية — صفحة {page}",
+            description=chunk,
+            color=0x5865F2,
+            timestamp=discord.utils.utcnow(),
+        )
+        if page == 1:
+            embed.add_field(name="إجمالي نشاط الرومات", value=format_activity(total_seconds), inline=False)
+            embed.set_footer(text="يتم تحديث الترتيب كل 7 أيام")
+        try:
+            await target.send(embed=embed)
+        except discord.DiscordException:
+            logger.exception("Could not publish weekly voice stats")
+            return
 
 
 def set_target(guild_id: int, channel_id: int | None) -> None:
@@ -549,6 +660,47 @@ async def voice_watchdog() -> None:
             ensure_reconnect(guild_id)
 
 
+@tasks.loop(seconds=30)
+async def voice_stats_watchdog() -> None:
+    now = time.time()
+    for guild in bot.guilds:
+        record = voice_stats.get(guild.id)
+        if not record or not record.get("channel_id"):
+            continue
+
+        period_start = float(record.get("period_start", now))
+        last_tick = float(record.get("last_tick", now))
+        active_before = stats_active_channels.get(guild.id, active_human_voice_channels(guild))
+        deadline = period_start + STATS_WEEK_SECONDS
+
+        if now >= deadline:
+            # Only count up to the weekly boundary, not beyond it.
+            elapsed = max(0.0, min(now, deadline) - last_tick)
+            for voice_channel_id in active_before:
+                key = str(voice_channel_id)
+                record.setdefault("seconds", {})[key] = float(record.setdefault("seconds", {}).get(key, 0.0)) + elapsed
+            await publish_weekly_stats(guild, record)
+            record["seconds"] = {}
+            record["period_start"] = now
+            record["last_tick"] = now
+            stats_active_channels[guild.id] = active_human_voice_channels(guild)
+        else:
+            elapsed = max(0.0, now - last_tick)
+            seconds = record.setdefault("seconds", {})
+            for voice_channel_id in active_before:
+                key = str(voice_channel_id)
+                seconds[key] = float(seconds.get(key, 0.0)) + elapsed
+            record["last_tick"] = now
+            stats_active_channels[guild.id] = active_human_voice_channels(guild)
+
+    save_voice_stats()
+
+
+@voice_stats_watchdog.before_loop
+async def before_voice_stats_watchdog() -> None:
+    await bot.wait_until_ready()
+
+
 @bot.event
 async def on_ready() -> None:
     logger.info("تم تسجيل الدخول باسم %s", bot.user)
@@ -563,6 +715,17 @@ async def on_ready() -> None:
     if not voice_watchdog.is_running():
         voice_watchdog.start()
 
+    # Start fresh activity sampling on reconnect so downtime is never counted.
+    now = time.time()
+    for guild in bot.guilds:
+        record = voice_stats.get(guild.id)
+        if record and record.get("channel_id"):
+            record["last_tick"] = now
+            stats_active_channels[guild.id] = active_human_voice_channels(guild)
+    save_voice_stats()
+    if not voice_stats_watchdog.is_running():
+        voice_stats_watchdog.start()
+
 
 @bot.event
 async def on_voice_state_update(
@@ -570,13 +733,73 @@ async def on_voice_state_update(
     before: discord.VoiceState,
     after: discord.VoiceState,
 ) -> None:
+    # Track human joins/leaves immediately so brief visits are not missed by polling.
+    guild_id = member.guild.id
+    record = voice_stats.get(guild_id)
+    if record and record.get("channel_id") and before.channel != after.channel:
+        now = time.time()
+        last_tick = float(record.get("last_tick", now))
+        elapsed = max(0.0, now - last_tick)
+        seconds = record.setdefault("seconds", {})
+        for voice_channel_id in stats_active_channels.get(guild_id, set()):
+            key = str(voice_channel_id)
+            seconds[key] = float(seconds.get(key, 0.0)) + elapsed
+        record["last_tick"] = now
+
+        for channel in (before.channel, after.channel):
+            if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+                continue
+            if any(not person.bot for person in channel.members):
+                stats_active_channels.setdefault(guild_id, set()).add(channel.id)
+            else:
+                stats_active_channels.setdefault(guild_id, set()).discard(channel.id)
+        save_voice_stats()
+
     if not bot.user or member.id != bot.user.id or before.channel == after.channel:
         return
-    guild_id = member.guild.id
     target_id = voice_targets.get(guild_id)
     if target_id is None or (after.channel and after.channel.id == target_id):
         return
     ensure_reconnect(guild_id)
+
+
+@bot.command(name="Setup", aliases=["setup"])
+@commands.guild_only()
+@commands.has_guild_permissions(manage_guild=True)
+async def setup_voice_stats(ctx: commands.Context) -> None:
+    """Set the text channel where weekly voice activity rankings are posted."""
+    if not isinstance(ctx.channel, discord.TextChannel):
+        await ctx.send("اكتب الأمر داخل شات نصي في السيرفر.")
+        return
+
+    now = time.time()
+    record = voice_stats.get(ctx.guild.id)
+    if not record or not record.get("channel_id"):
+        record = {
+            "channel_id": ctx.channel.id,
+            "period_start": now,
+            "last_tick": now,
+            "seconds": {},
+        }
+        voice_stats[ctx.guild.id] = record
+    else:
+        # Changing the report channel keeps the current week's accumulated totals.
+        record["channel_id"] = ctx.channel.id
+        record["last_tick"] = now
+
+    stats_active_channels[ctx.guild.id] = active_human_voice_channels(ctx.guild)
+    save_voice_stats()
+    embed = discord.Embed(
+        title="تم تفعيل إحصائيات الرومات الصوتية",
+        description=(
+            "بدأ حساب مدة وجود الأعضاء في جميع الرومات الصوتية، حتى لو كانوا صامتين.\n"
+            "سيظهر ترتيب الرومات من الأكثر نشاطًا إلى الأقل كل 7 أيام في هذا الشات."
+        ),
+        color=0x57F287,
+    )
+    embed.add_field(name="موعد التحديث", value="كل 7 أيام", inline=True)
+    embed.add_field(name="طريقة الحساب", value="وجود عضو واحد على الأقل في الروم", inline=True)
+    await ctx.send(embed=embed)
 
 
 @bot.command(name="ادخل")
@@ -749,6 +972,8 @@ async def on_command_error(
         await ctx.send("هذه الأوامر تعمل داخل السيرفر فقط.")
     elif isinstance(error, commands.CommandNotFound):
         return
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.send("تحتاج صلاحية **إدارة السيرفر (Manage Server)** لاستخدام هذا الأمر.")
     elif isinstance(error, commands.CommandInvokeError):
         logger.error("Command %s failed", ctx.command, exc_info=error.original)
     else:
