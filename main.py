@@ -16,9 +16,8 @@ from flask import Flask
 TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIX = "!"
 MAX_QUEUE = 50
-EXTRACT_TIMEOUT = 45  # ثواني
+EXTRACT_TIMEOUT = 45
 
-# أوامر مختصرة تشتغل بدون "!"
 SHORT_COMMANDS = {"ش", "وقف", "ك", "كمل", "س", "سكب", "كرر"}
 
 Track = dict[str, str]
@@ -59,8 +58,8 @@ FFMPEG_OPTIONS_AFTER = "-vn"
 
 queues: dict[int, list[tuple[Track, discord.abc.Messageable]]] = {}
 now_playing: dict[int, Track] = {}
-repeat_guilds: set[int] = set()  # تكرار الأغنية الحالية
-queue_repeat_guilds: set[int] = set()  # تكرار الطابور كاملًا
+repeat_guilds: set[int] = set()
+queue_repeat_guilds: set[int] = set()
 skipped_guilds: set[int] = set()
 last_announced: dict[int, Track] = {}
 history: dict[int, list[Track]] = {}
@@ -198,11 +197,15 @@ class PlayerView(discord.ui.View):
         super().__init__(timeout=None)
         self.guild_id = guild_id
         self.embed = embed
-        self.repeat_button.style = (
-            discord.ButtonStyle.success
-            if guild_id in repeat_guilds
-            else discord.ButtonStyle.secondary
-        )
+        if guild_id in repeat_guilds:
+            self.repeat_button.style = discord.ButtonStyle.success
+            self.repeat_button.label = "تكرار الأغنية"
+        elif guild_id in queue_repeat_guilds:
+            self.repeat_button.style = discord.ButtonStyle.primary
+            self.repeat_button.label = "تكرار الطابور"
+        else:
+            self.repeat_button.style = discord.ButtonStyle.secondary
+            self.repeat_button.label = "التكرار متوقف"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         voice_client = interaction.guild.voice_client if interaction.guild else None
@@ -300,23 +303,29 @@ class PlayerView(discord.ui.View):
         self.embed.set_footer(text=f"🔊 مستوى الصوت: {round(volume * 100)}%")
         await interaction.response.edit_message(embed=self.embed, view=self)
 
-    @discord.ui.button(emoji="🔉", style=discord.ButtonStyle.secondary, row=1)
-    async def volume_down_button(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
-        await self._change_volume(interaction, -VOLUME_STEP)
-
-    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(
+        label="التكرار متوقف",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+    )
     async def repeat_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        if self.guild_id in repeat_guilds:
-            repeat_guilds.discard(self.guild_id)
-            button.style = discord.ButtonStyle.secondary
-        else:
-            repeat_guilds.add(self.guild_id)
-            queue_repeat_guilds.discard(self.guild_id)
+        guild_id = self.guild_id
+        if guild_id not in repeat_guilds and guild_id not in queue_repeat_guilds:
+            repeat_guilds.add(guild_id)
             button.style = discord.ButtonStyle.success
+            button.label = "تكرار الأغنية"
+        elif guild_id in repeat_guilds:
+            repeat_guilds.discard(guild_id)
+            queue_repeat_guilds.add(guild_id)
+            button.style = discord.ButtonStyle.primary
+            button.label = "تكرار الطابور"
+        else:
+            queue_repeat_guilds.discard(guild_id)
+            repeat_guilds.discard(guild_id)
+            button.style = discord.ButtonStyle.secondary
+            button.label = "التكرار متوقف"
         await interaction.response.edit_message(view=self)
 
     @discord.ui.button(emoji="📜", style=discord.ButtonStyle.secondary, row=1)
@@ -441,14 +450,11 @@ async def advance_after_track(
         now_playing.pop(guild.id, None)
     skipped = guild.id in skipped_guilds
     skipped_guilds.discard(guild.id)
-
-    # تكرار الأغنية الحالية له الأولوية، أما تكرار الطابور فيضيفها للنهاية.
     if finished_ok and not skipped:
         if guild.id in repeat_guilds:
             queues.setdefault(guild.id, []).insert(0, (finished_track, requester_channel))
         elif guild.id in queue_repeat_guilds:
             queues.setdefault(guild.id, []).append((finished_track, requester_channel))
-
     await play_next(guild)
 
 
@@ -594,7 +600,7 @@ async def join_voice(ctx: commands.Context) -> None:
         logger.exception("Unexpected error while joining the voice channel")
         await ctx.send("تعذر دخول الروم بسبب خطأ غير متوقع.")
         return
-    await ctx.send(f"✅ دخلت الروم الصوتي: **{channel.name}**")
+    await ctx.send(f"دخلت الروم الصوتي: **{channel.name}**")
 
 
 @bot.command(name="ش")
@@ -621,7 +627,7 @@ async def play_song(ctx: commands.Context, *, search: str | None = None) -> None
         logger.exception("Could not join the voice channel")
         await ctx.send("تعذر دخول الروم الصوتي.")
         return
-    await ctx.send(f"🔎 أبحث عن **{search}**...")
+    await ctx.send(f"أبحث عن **{search}**...")
     try:
         track = await find_track(search)
     except ValueError as exc:
@@ -634,7 +640,7 @@ async def play_song(ctx: commands.Context, *, search: str | None = None) -> None
     track["requester"] = ctx.author.display_name
     queues.setdefault(ctx.guild.id, []).append((track, ctx.channel))
     if voice_client.is_playing() or voice_client.is_paused():
-        await ctx.send(f"➕ أُضيفت إلى الطابور: **{track['title']}**")
+        await ctx.send(f"أُضيفت إلى الطابور: **{track['title']}**")
     else:
         await play_next(ctx.guild)
 
@@ -647,7 +653,7 @@ async def pause_song(ctx: commands.Context) -> None:
         await ctx.send("يجب أن تكون في نفس الروم الصوتي مع البوت.")
     elif voice_client and voice_client.is_playing():
         voice_client.pause()
-        await ctx.send("⏸️ تم إيقاف الأغنية مؤقتًا.")
+        await ctx.send("تم إيقاف الأغنية مؤقتًا.")
     else:
         await ctx.send("ما فيه أغنية تعمل حاليًا.")
 
@@ -655,12 +661,11 @@ async def pause_song(ctx: commands.Context) -> None:
 @bot.command(name="ك", aliases=["كمل"])
 @commands.guild_only()
 async def resume_song(ctx: commands.Context) -> None:
-    voice_client = ctx.voice_client
     if not user_shares_bot_voice_channel(ctx):
         await ctx.send("يجب أن تكون في نفس الروم الصوتي مع البوت.")
-    elif voice_client and voice_client.is_paused():
-        voice_client.resume()
-        await ctx.send("▶️ تم استكمال الأغنية.")
+    elif ctx.voice_client and ctx.voice_client.is_paused():
+        ctx.voice_client.resume()
+        await ctx.send("تم استكمال الأغنية.")
     else:
         await ctx.send("ما فيه أغنية متوقفة مؤقتًا.")
 
@@ -675,7 +680,7 @@ async def skip_song(ctx: commands.Context) -> None:
     ):
         skipped_guilds.add(ctx.guild.id)
         ctx.voice_client.stop()
-        await ctx.send("⏭️ تم تخطي الأغنية.")
+        await ctx.send("تم تخطي الأغنية.")
     else:
         await ctx.send("ما فيه أغنية لتخطيها.")
 
@@ -688,25 +693,23 @@ async def toggle_repeat(
     if not user_shares_bot_voice_channel(ctx):
         await ctx.send("يجب أن تكون في نفس الروم الصوتي مع البوت.")
         return
-
     guild_id = ctx.guild.id
     if mode and mode.lower() in {"ط", "طابور"}:
         if guild_id in queue_repeat_guilds:
             queue_repeat_guilds.discard(guild_id)
-            await ctx.send("🔁 تم إيقاف تكرار الطابور.")
+            await ctx.send("تم إيقاف تكرار الطابور.")
         else:
             queue_repeat_guilds.add(guild_id)
             repeat_guilds.discard(guild_id)
-            await ctx.send("🔁 تم تفعيل تكرار الطابور كاملًا.")
+            await ctx.send("تم تفعيل تكرار الطابور كاملًا.")
         return
-
     if guild_id in repeat_guilds:
         repeat_guilds.discard(guild_id)
-        await ctx.send("🔁 تم إيقاف تكرار الأغنية الحالية.")
+        await ctx.send("تم إيقاف تكرار الأغنية الحالية.")
     else:
         repeat_guilds.add(guild_id)
         queue_repeat_guilds.discard(guild_id)
-        await ctx.send("🔁 تم تفعيل تكرار الأغنية الحالية.")
+        await ctx.send("تم تفعيل تكرار الأغنية الحالية.")
 
 
 @bot.command(name="طابور")
@@ -735,7 +738,7 @@ async def leave_voice(ctx: commands.Context) -> None:
     history.pop(guild_id, None)
     await clear_panel(guild_id)
     await ctx.voice_client.disconnect(force=True)
-    await ctx.send("👋 خرجت من الروم الصوتي.")
+    await ctx.send("خرجت من الروم الصوتي.")
 
 
 @bot.event
