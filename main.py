@@ -50,9 +50,7 @@ BASE_YTDL = {
     "no_warnings": True,
     "source_address": "0.0.0.0",
 }
-# البحث السريع: ما نجيب كل الصيغ، بس العنوان والرابط
 ytdl_search = yt_dlp.YoutubeDL({**BASE_YTDL, "extract_flat": "in_playlist"})
-# جلب رابط البث الفعلي وقت التشغيل
 ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
 ytdl_lock = asyncio.Lock()
 
@@ -61,12 +59,13 @@ FFMPEG_OPTIONS_AFTER = "-vn"
 
 queues: dict[int, list[tuple[Track, discord.abc.Messageable]]] = {}
 now_playing: dict[int, Track] = {}
-repeat_guilds: set[int] = set()  # السيرفرات اللي فعّلت التكرار
-skipped_guilds: set[int] = set()  # تخطي يدوي: ما نكرر الأغنية
+repeat_guilds: set[int] = set()  # تكرار الأغنية الحالية
+queue_repeat_guilds: set[int] = set()  # تكرار الطابور كاملًا
+skipped_guilds: set[int] = set()
 last_announced: dict[int, Track] = {}
-history: dict[int, list[Track]] = {}  # الأغاني اللي اشتغلت (لزر السابق)
-volumes: dict[int, float] = {}  # مستوى الصوت لكل سيرفر
-panels: dict[int, discord.Message] = {}  # لوحة التحكم الحالية لكل سيرفر
+history: dict[int, list[Track]] = {}
+volumes: dict[int, float] = {}
+panels: dict[int, discord.Message] = {}
 DEFAULT_VOLUME = 0.5
 MIN_VOLUME = 0.1
 MAX_VOLUME = 1.5
@@ -84,7 +83,6 @@ def load_targets() -> dict[int, int]:
         return {}
 
 
-# الروم الصوتي المطلوب بقاء البوت فيه لكل سيرفر (يُحفظ في ملف ليرجع بعد إعادة التشغيل)
 voice_targets: dict[int, int] = load_targets()
 
 
@@ -103,12 +101,7 @@ def set_target(guild_id: int, channel_id: int | None) -> None:
 voice_reconnect_tasks: dict[int, asyncio.Task[None]] = {}
 
 
-# ───────────────────────── البحث والاستخراج ─────────────────────────
-
-
-async def extract_info(
-    query: str, *, flat: bool = False
-) -> dict[str, Any] | None:
+async def extract_info(query: str, *, flat: bool = False) -> dict[str, Any] | None:
     ydl = ytdl_search if flat else ytdl_stream
     async with ytdl_lock:
         return await asyncio.wait_for(
@@ -120,7 +113,6 @@ async def extract_info(
 def build_queries(search: str) -> list[str]:
     if search.startswith(("http://", "https://")):
         return [search]
-    # أول شي SoundCloud، وإذا ما لقى نجرب يوتيوب
     return [f"scsearch1:{search}", f"ytsearch1:{search}"]
 
 
@@ -133,20 +125,14 @@ async def find_track(search: str) -> Track:
             last_error = exc
             logger.warning("Search failed for %s: %s", query, exc)
             continue
-
         if data and data.get("entries") is not None:
             data = next((e for e in data["entries"] if e), None)
         if not data:
             continue
-
         webpage = data.get("webpage_url") or data.get("url")
         if not webpage:
             continue
-        return {
-            "title": data.get("title") or "أغنية بدون اسم",
-            "webpage": webpage,
-        }
-
+        return {"title": data.get("title") or "أغنية بدون اسم", "webpage": webpage}
     if last_error:
         logger.error("All searches failed", exc_info=last_error)
     raise ValueError("ما لقيت الأغنية. جرّب اسمًا ثانيًا.")
@@ -168,17 +154,9 @@ def build_ffmpeg_source(
         header_str = "".join(f"{k}: {v}\r\n" for k, v in headers.items())
         before += f" -headers {shlex.quote(header_str)}"
     source = discord.FFmpegPCMAudio(
-        stream["url"],
-        before_options=before,
-        options=FFMPEG_OPTIONS_AFTER,
+        stream["url"], before_options=before, options=FFMPEG_OPTIONS_AFTER
     )
     return discord.PCMVolumeTransformer(source, volume=volume)
-
-
-# ───────────────────────── التشغيل ─────────────────────────
-
-
-# ───────────────────────── لوحة التحكم ─────────────────────────
 
 
 def format_duration(seconds: Any) -> str:
@@ -195,10 +173,8 @@ def queue_text(guild_id: int) -> str:
     queue = queues.get(guild_id, [])
     current = now_playing.get(guild_id)
     heading = f"🎵 تعمل الآن: **{current['title']}**\n" if current else ""
-
     if not queue:
         return heading or "قائمة الانتظار فارغة."
-
     lines = [
         f"{index}. {track['title']}"
         for index, (track, _channel) in enumerate(queue[:15], 1)
@@ -253,17 +229,14 @@ class PlayerView(discord.ui.View):
                 "ما فيه أغنية تعمل حاليًا.", ephemeral=True
             )
             return
-
         played = history.setdefault(self.guild_id, [])
         if played and played[-1] is current:
             played.pop()
         previous = played.pop() if played else None
-
         queue = queues.setdefault(self.guild_id, [])
         queue.insert(0, (current, interaction.channel))
         if previous:
             queue.insert(0, (previous, interaction.channel))
-
         skipped_guilds.add(self.guild_id)
         voice_client.stop()
         await interaction.response.defer()
@@ -275,6 +248,7 @@ class PlayerView(discord.ui.View):
         voice_client = interaction.guild.voice_client
         queues.pop(self.guild_id, None)
         repeat_guilds.discard(self.guild_id)
+        queue_repeat_guilds.discard(self.guild_id)
         if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
             skipped_guilds.add(self.guild_id)
             voice_client.stop()
@@ -319,7 +293,9 @@ class PlayerView(discord.ui.View):
         current = volumes.get(self.guild_id, DEFAULT_VOLUME)
         volume = round(min(MAX_VOLUME, max(MIN_VOLUME, current + delta)), 2)
         volumes[self.guild_id] = volume
-        if voice_client and isinstance(voice_client.source, discord.PCMVolumeTransformer):
+        if voice_client and isinstance(
+            voice_client.source, discord.PCMVolumeTransformer
+        ):
             voice_client.source.volume = volume
         self.embed.set_footer(text=f"🔊 مستوى الصوت: {round(volume * 100)}%")
         await interaction.response.edit_message(embed=self.embed, view=self)
@@ -339,6 +315,7 @@ class PlayerView(discord.ui.View):
             button.style = discord.ButtonStyle.secondary
         else:
             repeat_guilds.add(self.guild_id)
+            queue_repeat_guilds.discard(self.guild_id)
             button.style = discord.ButtonStyle.success
         await interaction.response.edit_message(view=self)
 
@@ -364,7 +341,6 @@ async def show_panel(
     stream: dict[str, Any],
 ) -> None:
     await clear_panel(guild.id)
-
     volume = volumes.get(guild.id, DEFAULT_VOLUME)
     safe_title = track["title"].replace("[", "(").replace("]", ")")
     embed = discord.Embed(
@@ -382,7 +358,6 @@ async def show_panel(
     if track.get("requester"):
         embed.add_field(name="🙋 الطالب", value=track["requester"], inline=True)
     embed.set_footer(text=f"🔊 مستوى الصوت: {round(volume * 100)}%")
-
     try:
         panels[guild.id] = await channel.send(
             embed=embed, view=PlayerView(guild.id, embed)
@@ -397,24 +372,22 @@ async def play_next(guild: discord.Guild) -> None:
         voice_client = guild.voice_client
         if not voice_client or not voice_client.is_connected():
             return
-        # إذا فيه أغنية تشتغل لا نلمس الطابور (تجنب "Already playing")
         if voice_client.is_playing() or voice_client.is_paused():
             return
-
         queue = queues.setdefault(guild.id, [])
         if not queue:
             now_playing.pop(guild.id, None)
             await clear_panel(guild.id)
             return
-
         while queue:
             track, requester_channel = queue.pop(0)
             try:
                 stream = await extract_info(track["webpage"])
                 if not stream or not stream.get("url"):
                     raise ValueError("لم أتمكن من الحصول على رابط البث.")
-
-                source = build_ffmpeg_source(stream, volumes.get(guild.id, DEFAULT_VOLUME))
+                source = build_ffmpeg_source(
+                    stream, volumes.get(guild.id, DEFAULT_VOLUME)
+                )
                 now_playing[guild.id] = track
 
                 def after_play(
@@ -438,7 +411,6 @@ async def play_next(guild: discord.Guild) -> None:
                     future.add_done_callback(report_failure)
 
                 voice_client.play(source, after=after_play)
-                # ما نكرر رسالة "الآن تعمل" عند تكرار نفس الأغنية
                 played = history.setdefault(guild.id, [])
                 if not played or played[-1] is not track:
                     played.append(track)
@@ -455,7 +427,6 @@ async def play_next(guild: discord.Guild) -> None:
                     requester_channel,
                     f"تعذر تشغيل **{track['title']}**؛ سأنتقل للأغنية التالية.",
                 )
-
         now_playing.pop(guild.id, None)
         await clear_panel(guild.id)
 
@@ -468,17 +439,17 @@ async def advance_after_track(
 ) -> None:
     if now_playing.get(guild.id) is finished_track:
         now_playing.pop(guild.id, None)
-
     skipped = guild.id in skipped_guilds
     skipped_guilds.discard(guild.id)
-    # التكرار: نرجّع الأغنية أول الطابور إذا انتهت طبيعيًا (مو تخطي ولا خطأ)
-    if guild.id in repeat_guilds and finished_ok and not skipped:
-        queues.setdefault(guild.id, []).insert(0, (finished_track, requester_channel))
+
+    # تكرار الأغنية الحالية له الأولوية، أما تكرار الطابور فيضيفها للنهاية.
+    if finished_ok and not skipped:
+        if guild.id in repeat_guilds:
+            queues.setdefault(guild.id, []).insert(0, (finished_track, requester_channel))
+        elif guild.id in queue_repeat_guilds:
+            queues.setdefault(guild.id, []).append((finished_track, requester_channel))
 
     await play_next(guild)
-
-
-# ───────────────────────── الاتصال الصوتي ─────────────────────────
 
 
 def user_shares_bot_voice_channel(ctx: commands.Context) -> bool:
@@ -493,7 +464,6 @@ def user_shares_bot_voice_channel(ctx: commands.Context) -> bool:
 async def connect_voice(
     guild: discord.Guild, channel: discord.VoiceChannel | discord.StageChannel
 ) -> discord.VoiceClient:
-    """يدخل الروم أو ينتقل له، مع قفل يمنع تضارب الاتصالات."""
     lock = voice_connection_locks.setdefault(guild.id, asyncio.Lock())
     async with lock:
         previous_target = voice_targets.get(guild.id)
@@ -514,20 +484,17 @@ async def connect_voice(
 
 
 async def reconnect_to_voice(guild_id: int, channel_id: int) -> None:
-    """يعيد المحاولة باستمرار (مع تأخير متزايد) عشان البوت يبقى 24/7."""
     attempt = 0
     while voice_targets.get(guild_id) == channel_id:
         attempt += 1
         await asyncio.sleep(min(2 ** min(attempt, 6), 60))
         if voice_targets.get(guild_id) != channel_id:
             return
-
         guild = bot.get_guild(guild_id)
         channel = guild.get_channel(channel_id) if guild else None
         if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
             set_target(guild_id, None)
             return
-
         try:
             voice_client = guild.voice_client
             if (
@@ -545,14 +512,12 @@ async def reconnect_to_voice(guild_id: int, channel_id: int) -> None:
 
 
 def ensure_reconnect(guild_id: int) -> None:
-    """يشغّل مهمة إعادة الاتصال إذا ما فيه مهمة شغالة."""
     target_id = voice_targets.get(guild_id)
     if target_id is None:
         return
     current_task = voice_reconnect_tasks.get(guild_id)
     if current_task and not current_task.done():
         return
-
     task = asyncio.create_task(reconnect_to_voice(guild_id, target_id))
     voice_reconnect_tasks[guild_id] = task
 
@@ -565,7 +530,6 @@ def ensure_reconnect(guild_id: int) -> None:
 
 @tasks.loop(seconds=30)
 async def voice_watchdog() -> None:
-    """كل 30 ثانية يتأكد أن البوت في الروم المطلوب، وإذا لا يرجّعه."""
     for guild_id, channel_id in list(voice_targets.items()):
         guild = bot.get_guild(guild_id)
         if not guild:
@@ -582,8 +546,6 @@ async def voice_watchdog() -> None:
 @bot.event
 async def on_ready() -> None:
     logger.info("تم تسجيل الدخول باسم %s", bot.user)
-
-    # اختياري: روم افتراضي من متغير بيئة VOICE_CHANNEL_ID (يفيد بعد إعادة النشر على Render)
     env_channel = os.getenv("VOICE_CHANNEL_ID")
     if env_channel and env_channel.isdigit():
         channel = bot.get_channel(int(env_channel))
@@ -592,7 +554,6 @@ async def on_ready() -> None:
             and channel.guild.id not in voice_targets
         ):
             set_target(channel.guild.id, channel.id)
-
     if not voice_watchdog.is_running():
         voice_watchdog.start()
 
@@ -605,16 +566,11 @@ async def on_voice_state_update(
 ) -> None:
     if not bot.user or member.id != bot.user.id or before.channel == after.channel:
         return
-
     guild_id = member.guild.id
     target_id = voice_targets.get(guild_id)
     if target_id is None or (after.channel and after.channel.id == target_id):
         return
-
     ensure_reconnect(guild_id)
-
-
-# ───────────────────────── الأوامر ─────────────────────────
 
 
 @bot.command(name="ادخل")
@@ -623,7 +579,6 @@ async def join_voice(ctx: commands.Context) -> None:
     if not ctx.author.voice or not ctx.author.voice.channel:
         await ctx.send("ادخل رومًا صوتيًا أولًا ثم اكتب `!ادخل`.")
         return
-
     channel = ctx.author.voice.channel
     permissions = channel.permissions_for(ctx.guild.me)
     if not permissions.view_channel or not permissions.connect:
@@ -632,7 +587,6 @@ async def join_voice(ctx: commands.Context) -> None:
             "بصلاحية **View Channel** و **Connect**."
         )
         return
-
     await ctx.send(f"⏳ أحاول دخول الروم الصوتي **{channel.name}**...")
     try:
         await connect_voice(ctx.guild, channel)
@@ -640,7 +594,6 @@ async def join_voice(ctx: commands.Context) -> None:
         logger.exception("Unexpected error while joining the voice channel")
         await ctx.send("تعذر دخول الروم بسبب خطأ غير متوقع.")
         return
-
     await ctx.send(f"✅ دخلت الروم الصوتي: **{channel.name}**")
 
 
@@ -661,7 +614,6 @@ async def play_song(ctx: commands.Context, *, search: str | None = None) -> None
     if len(queues.get(ctx.guild.id, [])) >= MAX_QUEUE:
         await ctx.send(f"الطابور ممتلئ (الحد الأقصى {MAX_QUEUE} أغنية).")
         return
-
     channel = ctx.author.voice.channel
     try:
         voice_client = await connect_voice(ctx.guild, channel)
@@ -669,7 +621,6 @@ async def play_song(ctx: commands.Context, *, search: str | None = None) -> None
         logger.exception("Could not join the voice channel")
         await ctx.send("تعذر دخول الروم الصوتي.")
         return
-
     await ctx.send(f"🔎 أبحث عن **{search}**...")
     try:
         track = await find_track(search)
@@ -680,7 +631,6 @@ async def play_song(ctx: commands.Context, *, search: str | None = None) -> None
         logger.exception("Search crashed")
         await ctx.send("صار خطأ أثناء البحث، جرّب مرة ثانية.")
         return
-
     track["requester"] = ctx.author.display_name
     queues.setdefault(ctx.guild.id, []).append((track, ctx.channel))
     if voice_client.is_playing() or voice_client.is_paused():
@@ -718,12 +668,13 @@ async def resume_song(ctx: commands.Context) -> None:
 @bot.command(name="س", aliases=["سكب"])
 @commands.guild_only()
 async def skip_song(ctx: commands.Context) -> None:
-    voice_client = ctx.voice_client
     if not user_shares_bot_voice_channel(ctx):
         await ctx.send("يجب أن تكون في نفس الروم الصوتي مع البوت.")
-    elif voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+    elif ctx.voice_client and (
+        ctx.voice_client.is_playing() or ctx.voice_client.is_paused()
+    ):
         skipped_guilds.add(ctx.guild.id)
-        voice_client.stop()
+        ctx.voice_client.stop()
         await ctx.send("⏭️ تم تخطي الأغنية.")
     else:
         await ctx.send("ما فيه أغنية لتخطيها.")
@@ -731,15 +682,31 @@ async def skip_song(ctx: commands.Context) -> None:
 
 @bot.command(name="كرر")
 @commands.guild_only()
-async def toggle_repeat(ctx: commands.Context) -> None:
+async def toggle_repeat(
+    ctx: commands.Context, mode: str | None = None
+) -> None:
     if not user_shares_bot_voice_channel(ctx):
         await ctx.send("يجب أن تكون في نفس الروم الصوتي مع البوت.")
-    elif ctx.guild.id in repeat_guilds:
-        repeat_guilds.discard(ctx.guild.id)
-        await ctx.send("🔁 تم إيقاف التكرار.")
+        return
+
+    guild_id = ctx.guild.id
+    if mode and mode.lower() in {"ط", "طابور"}:
+        if guild_id in queue_repeat_guilds:
+            queue_repeat_guilds.discard(guild_id)
+            await ctx.send("🔁 تم إيقاف تكرار الطابور.")
+        else:
+            queue_repeat_guilds.add(guild_id)
+            repeat_guilds.discard(guild_id)
+            await ctx.send("🔁 تم تفعيل تكرار الطابور كاملًا.")
+        return
+
+    if guild_id in repeat_guilds:
+        repeat_guilds.discard(guild_id)
+        await ctx.send("🔁 تم إيقاف تكرار الأغنية الحالية.")
     else:
-        repeat_guilds.add(ctx.guild.id)
-        await ctx.send("🔁 تم تفعيل التكرار: الأغنية الحالية تعيد نفسها بعد ما تنتهي.")
+        repeat_guilds.add(guild_id)
+        queue_repeat_guilds.discard(guild_id)
+        await ctx.send("🔁 تم تفعيل تكرار الأغنية الحالية.")
 
 
 @bot.command(name="طابور")
@@ -756,15 +723,13 @@ async def leave_voice(ctx: commands.Context) -> None:
     reconnect_task = voice_reconnect_tasks.pop(guild_id, None)
     if reconnect_task and not reconnect_task.done():
         reconnect_task.cancel()
-
     if not ctx.voice_client:
         await ctx.send("أنا لست في روم صوتي.")
         return
-
-    # نفرغ الطابور قبل الخروج عشان ما يبدأ البوت أغنية جديدة
     queues.pop(guild_id, None)
     now_playing.pop(guild_id, None)
     repeat_guilds.discard(guild_id)
+    queue_repeat_guilds.discard(guild_id)
     skipped_guilds.discard(guild_id)
     last_announced.pop(guild_id, None)
     history.pop(guild_id, None)
@@ -787,11 +752,7 @@ async def on_command_error(
         logger.warning("Command error: %s", error)
 
 
-# ───────────────────────── التشغيل ─────────────────────────
-
-
 def ensure_single_instance(port: int) -> None:
-    """إذا المنفذ مشغول معناه فيه نسخة ثانية من البوت تعمل، فنخرج."""
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         probe.bind(("0.0.0.0", port))
@@ -824,6 +785,5 @@ if __name__ == "__main__":
         raise RuntimeError("أضف توكن البوت في Secrets باسم DISCORD_TOKEN.")
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("FFmpeg غير موجود.")
-
     keep_alive()
     bot.run(TOKEN, log_handler=None)
