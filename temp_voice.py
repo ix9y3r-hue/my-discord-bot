@@ -448,7 +448,7 @@ class TempVoicePanel(discord.ui.View):
             await _reply(interaction, "تم السماح بالدردشة." if enabled else "تم إيقاف الدردشة.")
         except discord.HTTPException: await _reply(interaction, "تعذر تغيير صلاحية الدردشة.")
 
-    @discord.ui.button(label="المنطقة", emoji="🌐", style=discord.ButtonStyle.secondary, custom_id="tempvoice:region", row=1)
+    @discord.ui.button(label="المنطقة", emoji="🌐", style=discord.ButtonStyle.secondary, custom_id="tempvoice:region", row=0)
     async def region(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         c = await _room_or_reply(interaction)
         if not c: return
@@ -461,7 +461,7 @@ class TempVoicePanel(discord.ui.View):
         c = await _room_or_reply(interaction)
         if c: await interaction.response.send_modal(ArabicRoomModal("جودة الصوت", "معدل البت بالكيلوبت (8-384)", "room_bitrate", default=str(c.bitrate // 1000), max_length=3))
 
-    @discord.ui.button(label="قفل", emoji="🔒", style=discord.ButtonStyle.secondary, custom_id="tempvoice:lock", row=2)
+    @discord.ui.button(label="قفل", emoji="🔒", style=discord.ButtonStyle.secondary, custom_id="tempvoice:lock", row=1)
     async def lock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         c = await _room_or_reply(interaction)
         if not c: return
@@ -473,7 +473,7 @@ class TempVoicePanel(discord.ui.View):
             await _reply(interaction, "تم فتح الروم." if locked else "تم قفل الروم.")
         except discord.HTTPException: await _reply(interaction, "تعذر قفل الروم أو فتحه.")
 
-    @discord.ui.button(label="فتح", emoji="🔓", style=discord.ButtonStyle.secondary, custom_id="tempvoice:unlock", row=2)
+    @discord.ui.button(label="فتح", emoji="🔓", style=discord.ButtonStyle.secondary, custom_id="tempvoice:unlock", row=1)
     async def unlock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         c = await _room_or_reply(interaction)
         if not c: return
@@ -482,39 +482,39 @@ class TempVoicePanel(discord.ui.View):
             await c.set_permissions(c.guild.default_role, overwrite=ow); await _reply(interaction, "تم فتح الروم.")
         except discord.HTTPException: await _reply(interaction, "تعذر فتح الروم.")
 
-    @discord.ui.button(label="وثوق", emoji="✅", style=discord.ButtonStyle.secondary, custom_id="tempvoice:trust", row=2)
+    @discord.ui.button(label="وثوق", emoji="✅", style=discord.ButtonStyle.secondary, custom_id="tempvoice:trust", row=1)
     async def trust(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "إضافة عضو موثوق", "آيدي العضو", "room_trust")
 
-    @discord.ui.button(label="إلغاء الوثوق", emoji="🚫", style=discord.ButtonStyle.secondary, custom_id="tempvoice:untrust", row=2)
+    @discord.ui.button(label="إلغاء الوثوق", emoji="🚫", style=discord.ButtonStyle.secondary, custom_id="tempvoice:untrust", row=1)
     async def untrust(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "إلغاء الوثوق", "آيدي العضو", "room_untrust")
 
-    @discord.ui.button(label="دعوة", emoji="➕", style=discord.ButtonStyle.secondary, custom_id="tempvoice:invite", row=3)
+    @discord.ui.button(label="دعوة", emoji="➕", style=discord.ButtonStyle.secondary, custom_id="tempvoice:invite", row=2)
     async def invite(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "دعوة عضو", "آيدي العضو", "room_invite")
 
-    @discord.ui.button(label="إلغاء الدعوة", emoji="➖", style=discord.ButtonStyle.secondary, custom_id="tempvoice:uninvite", row=3)
+    @discord.ui.button(label="إلغاء الدعوة", emoji="➖", style=discord.ButtonStyle.secondary, custom_id="tempvoice:uninvite", row=2)
     async def uninvite(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "إلغاء دعوة عضو", "آيدي العضو", "room_uninvite")
 
-    @discord.ui.button(label="طلب دخول", emoji="🔔", style=discord.ButtonStyle.secondary, custom_id="tempvoice:knock", row=3)
+    @discord.ui.button(label="طلب دخول", emoji="🔔", style=discord.ButtonStyle.secondary, custom_id="tempvoice:knock", row=2)
     async def knock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.send_modal(KnockModal())
 
-    @discord.ui.button(label="إخراج عضو", emoji="👋", style=discord.ButtonStyle.secondary, custom_id="tempvoice:kick", row=3)
+    @discord.ui.button(label="إخراج عضو", emoji="👋", style=discord.ButtonStyle.secondary, custom_id="tempvoice:kick", row=2)
     async def kick(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "إخراج عضو", "آيدي العضو", "room_kick")
 
-    @discord.ui.button(label="حظر", emoji="⛔", style=discord.ButtonStyle.secondary, custom_id="tempvoice:block", row=4)
+    @discord.ui.button(label="حظر", emoji="⛔", style=discord.ButtonStyle.secondary, custom_id="tempvoice:block", row=2)
     async def block(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "حظر عضو من الروم", "آيدي العضو", "room_block")
 
-    @discord.ui.button(label="رفع الحظر", emoji="☑️", style=discord.ButtonStyle.secondary, custom_id="tempvoice:unblock", row=4)
+    @discord.ui.button(label="رفع الحظر", emoji="☑️", style=discord.ButtonStyle.secondary, custom_id="tempvoice:unblock", row=3)
     async def unblock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "رفع الحظر", "آيدي العضو", "room_unblock")
 
-    @discord.ui.button(label="استلام الملكية", emoji="👑", style=discord.ButtonStyle.secondary, custom_id="tempvoice:claim", row=4)
+    @discord.ui.button(label="استلام الملكية", emoji="👑", style=discord.ButtonStyle.secondary, custom_id="tempvoice:claim", row=3)
     async def claim(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         member = interaction.user
         c = member.voice.channel if isinstance(member, discord.Member) and member.voice else None
@@ -533,11 +533,11 @@ class TempVoicePanel(discord.ui.View):
         except discord.HTTPException:
             await _reply(interaction, "تعذر استلام الملكية.")
 
-    @discord.ui.button(label="نقل الملكية", emoji="🔁", style=discord.ButtonStyle.secondary, custom_id="tempvoice:transfer", row=4)
+    @discord.ui.button(label="نقل الملكية", emoji="🔁", style=discord.ButtonStyle.secondary, custom_id="tempvoice:transfer", row=3)
     async def transfer(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "نقل ملكية الروم", "آيدي العضو الجديد", "room_transfer")
 
-    @discord.ui.button(label="حذف الروم", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="tempvoice:delete", row=4)
+    @discord.ui.button(label="حذف الروم", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="tempvoice:delete", row=3)
     async def delete_room(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         c = await _room_or_reply(interaction)
         if not c: return
@@ -548,7 +548,7 @@ class TempVoicePanel(discord.ui.View):
             await c.delete(reason=f"حذف الروم بواسطة {interaction.user}")
         except discord.HTTPException: logger.exception("Could not delete temporary room %s", c.id)
 
-    @discord.ui.button(label="إعادة ضبط", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="tempvoice:reset", row=4)
+    @discord.ui.button(label="إعادة ضبط", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="tempvoice:reset", row=3)
     async def reset(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         c = await _room_or_reply(interaction)
         if not c: return
