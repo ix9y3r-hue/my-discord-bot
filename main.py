@@ -6,8 +6,6 @@ import os
 import shlex
 import shutil
 import socket
-import sys
-from pathlib import Path
 from threading import Thread
 from typing import Any
 
@@ -47,22 +45,9 @@ logger = logging.getLogger("discord_music_bot")
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
-
-
 class MusicBot(commands.Bot):
     async def setup_hook(self) -> None:
-        # Ensure extensions in the same folder as main.py are importable on hosts
-        # that launch the bot from a different working directory.
-        project_dir = str(Path(__file__).resolve().parent)
-        if project_dir not in sys.path:
-            sys.path.insert(0, project_dir)
-
-        extension_file = Path(project_dir) / "temp_voice.py"
-        if not extension_file.is_file():
-            raise FileNotFoundError(
-                f"Missing {extension_file}. Upload temp_voice.py beside main.py."
-            )
-
+        # Load the temporary voice-room system before the bot connects.
         await self.load_extension("temp_voice")
 
 

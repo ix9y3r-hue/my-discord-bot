@@ -135,6 +135,25 @@ class TemporaryVoice(commands.Cog):
         embed.set_footer(text="إعداد النظام مرة واحدة فقط")
         await interaction.response.send_message(embed=embed)
 
+
+    @app_commands.command(
+        name="setup_voice_panel",
+        description="إرسال لوحة التحكم بالرومات الصوتية المؤقتة",
+    )
+    @app_commands.guild_only()
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def setup_voice_panel(self, interaction: discord.Interaction) -> None:
+        embed = discord.Embed(
+            title="لوحة التحكم بالرومات المؤقتة",
+            description=(
+                "ادخل رومك الصوتي المؤقت أولًا، ثم استخدم الأزرار:\n"
+                "• تغيير اسم الروم\n• قفل الروم أو فتحه\n"
+                "• تحديد عدد الأعضاء\n• حذف رومك المؤقت"
+            ),
+            color=discord.Color.blurple(),
+        )
+        await interaction.response.send_message(embed=embed, view=TempVoicePanel())
+
     @commands.Cog.listener()
     async def on_ready(self) -> None:
         # Rebuild our temporary-channel registry after bot restarts.
@@ -221,5 +240,108 @@ class TemporaryVoice(commands.Cog):
                     self.temporary_channel_ids.discard(before.channel.id)
 
 
+def _get_owned_temp_channel(interaction: discord.Interaction) -> discord.VoiceChannel | None:
+    member = interaction.user
+    if not isinstance(member, discord.Member) or member.voice is None:
+        return None
+    channel = member.voice.channel
+    if not isinstance(channel, discord.VoiceChannel) or not channel.name.startswith("🔊・"):
+        return None
+    # The room creator receives manage_channels=True in this feature's overwrite.
+    if channel.overwrites_for(member).manage_channels is True:
+        return channel
+    return None
+
+
+class RenameTempRoomModal(discord.ui.Modal, title="تغيير اسم الروم"):
+    room_name = discord.ui.TextInput(label="الاسم الجديد", max_length=90)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        channel = _get_owned_temp_channel(interaction)
+        if channel is None:
+            await interaction.response.send_message("ادخل رومك المؤقت أولًا. هذه اللوحة تتحكم برومك فقط.", ephemeral=True)
+            return
+        name = self.room_name.value.strip()
+        if not name:
+            await interaction.response.send_message("اكتب اسمًا صحيحًا.", ephemeral=True)
+            return
+        try:
+            await channel.edit(name=f"🔊・{name}", reason="Rename temporary voice room from panel")
+            await interaction.response.send_message("تم تغيير اسم الروم.", ephemeral=True)
+        except discord.HTTPException:
+            await interaction.response.send_message("تعذر تغيير الاسم. تأكد من صلاحيات البوت.", ephemeral=True)
+
+
+class TempRoomLimitModal(discord.ui.Modal, title="تحديد عدد الأعضاء"):
+    limit = discord.ui.TextInput(label="عدد الأعضاء (0 إلى 99، والصفر بلا حد)", max_length=2, default="0")
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        channel = _get_owned_temp_channel(interaction)
+        if channel is None:
+            await interaction.response.send_message("ادخل رومك المؤقت أولًا.", ephemeral=True)
+            return
+        try:
+            amount = int(self.limit.value)
+            if not 0 <= amount <= 99:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message("اكتب رقمًا من 0 إلى 99.", ephemeral=True)
+            return
+        try:
+            await channel.edit(user_limit=amount, reason="Change temporary voice room user limit")
+            await interaction.response.send_message("تم تحديث عدد الأعضاء.", ephemeral=True)
+        except discord.HTTPException:
+            await interaction.response.send_message("تعذر تحديث عدد الأعضاء.", ephemeral=True)
+
+
+class TempVoicePanel(discord.ui.View):
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="تغيير الاسم", style=discord.ButtonStyle.primary, custom_id="tempvoice:rename")
+    async def rename(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if _get_owned_temp_channel(interaction) is None:
+            await interaction.response.send_message("ادخل رومك المؤقت الذي تملكه أولًا.", ephemeral=True)
+            return
+        await interaction.response.send_modal(RenameTempRoomModal())
+
+    @discord.ui.button(label="قفل / فتح", style=discord.ButtonStyle.secondary, custom_id="tempvoice:lock")
+    async def lock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        channel = _get_owned_temp_channel(interaction)
+        if channel is None:
+            await interaction.response.send_message("ادخل رومك المؤقت الذي تملكه أولًا.", ephemeral=True)
+            return
+        everyone = channel.guild.default_role
+        overwrite = channel.overwrites_for(everyone)
+        currently_locked = overwrite.connect is False
+        overwrite.connect = None if currently_locked else False
+        try:
+            await channel.set_permissions(everyone, overwrite=overwrite, reason="Lock or unlock temporary voice room")
+            await interaction.response.send_message("تم فتح الروم." if currently_locked else "تم قفل الروم.", ephemeral=True)
+        except discord.HTTPException:
+            await interaction.response.send_message("تعذر تغيير صلاحية الدخول للروم.", ephemeral=True)
+
+    @discord.ui.button(label="عدد الأعضاء", style=discord.ButtonStyle.secondary, custom_id="tempvoice:limit")
+    async def set_limit(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if _get_owned_temp_channel(interaction) is None:
+            await interaction.response.send_message("ادخل رومك المؤقت الذي تملكه أولًا.", ephemeral=True)
+            return
+        await interaction.response.send_modal(TempRoomLimitModal())
+
+    @discord.ui.button(label="حذف الروم", style=discord.ButtonStyle.danger, custom_id="tempvoice:delete")
+    async def delete_room(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        channel = _get_owned_temp_channel(interaction)
+        if channel is None:
+            await interaction.response.send_message("ادخل رومك المؤقت الذي تملكه أولًا.", ephemeral=True)
+            return
+        await interaction.response.send_message("جارٍ حذف رومك المؤقت.", ephemeral=True)
+        try:
+            await channel.delete(reason=f"Temporary room deleted by {interaction.user}")
+        except discord.HTTPException:
+            logger.exception("Could not delete temporary room %s", channel.id)
+
+
+
 async def setup(bot: commands.Bot) -> None:
+    bot.add_view(TempVoicePanel())
     await bot.add_cog(TemporaryVoice(bot))
