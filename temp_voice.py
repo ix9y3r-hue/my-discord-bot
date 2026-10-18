@@ -144,14 +144,16 @@ class TemporaryVoice(commands.Cog):
     @app_commands.checks.has_permissions(manage_guild=True)
     async def setup_voice_panel(self, interaction: discord.Interaction) -> None:
         embed = discord.Embed(
-            title="لوحة التحكم بالرومات المؤقتة",
+            title="لوحة التحكم بالرومات الصوتية المؤقتة",
             description=(
-                "ادخل رومك الصوتي المؤقت أولًا، ثم استخدم الأزرار:\n"
-                "• تغيير اسم الروم\n• قفل الروم أو فتحه\n"
-                "• تحديد عدد الأعضاء\n• حذف رومك المؤقت"
+                "ادخل رومك المؤقت أولًا، ثم اختر الإعداد المطلوب من الأزرار.\n"
+                "تقدر تغيّر الاسم والخصوصية والدردشة والمنطقة وجودة الصوت، "
+                "وتدير الأعضاء بالدعوة والوثوق والحظر والإخراج ونقل الملكية.\n\n"
+                "الأزرار لا تعمل إلا لمالك الروم المؤقت."
             ),
             color=discord.Color.blurple(),
         )
+        embed.set_footer(text="لوحة الرومات المؤقتة")
         await interaction.response.send_message(embed=embed, view=TempVoicePanel())
 
     @commands.Cog.listener()
@@ -162,9 +164,13 @@ class TemporaryVoice(commands.Cog):
             category_id = settings.get("category_id")
             category = guild.get_channel(category_id) if category_id else None
             if isinstance(category, discord.CategoryChannel):
-                for channel in category.voice_channels:
-                    if channel.name.startswith("🔊・"):
-                        self.temporary_channel_ids.add(channel.id)
+                candidates = category.voice_channels
+            else:
+                # The category is optional; recover temporary rooms across the guild after restart.
+                candidates = guild.voice_channels
+            for channel in candidates:
+                if channel.name.startswith("🔊・"):
+                    self.temporary_channel_ids.add(channel.id)
 
     @commands.Cog.listener()
     async def on_voice_state_update(
@@ -240,106 +246,344 @@ class TemporaryVoice(commands.Cog):
                     self.temporary_channel_ids.discard(before.channel.id)
 
 
+
 def _get_owned_temp_channel(interaction: discord.Interaction) -> discord.VoiceChannel | None:
     member = interaction.user
     if not isinstance(member, discord.Member) or member.voice is None:
         return None
     channel = member.voice.channel
-    if not isinstance(channel, discord.VoiceChannel) or not channel.name.startswith("🔊・"):
+    if not isinstance(channel, discord.VoiceChannel) or channel.id not in _all_temp_ids(interaction.client):
         return None
-    # The room creator receives manage_channels=True in this feature's overwrite.
     if channel.overwrites_for(member).manage_channels is True:
         return channel
     return None
 
 
-class RenameTempRoomModal(discord.ui.Modal, title="تغيير اسم الروم"):
-    room_name = discord.ui.TextInput(label="الاسم الجديد", max_length=90)
+def _all_temp_ids(bot: commands.Bot) -> set[int]:
+    cog = bot.get_cog("TemporaryVoice")
+    return cog.temporary_channel_ids if cog else set()
+
+
+def _owner(channel: discord.VoiceChannel) -> discord.Member | None:
+    for target, overwrite in channel.overwrites.items():
+        if isinstance(target, discord.Member) and overwrite.manage_channels is True:
+            return target
+    return None
+
+
+async def _reply(interaction: discord.Interaction, message: str, *, ephemeral: bool = True) -> None:
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=ephemeral)
+    else:
+        await interaction.response.send_message(message, ephemeral=ephemeral)
+
+
+async def _room_or_reply(interaction: discord.Interaction) -> discord.VoiceChannel | None:
+    channel = _get_owned_temp_channel(interaction)
+    if channel is None:
+        await _reply(interaction, "ادخل رومك الصوتي المؤقت الذي تملكه أولًا.")
+    return channel
+
+
+class ArabicRoomModal(discord.ui.Modal):
+    def __init__(self, title: str, label: str, custom_id: str, *, default: str = "", max_length: int = 90):
+        super().__init__(title=title, timeout=180)
+        self.field = discord.ui.TextInput(label=label, custom_id=custom_id, default=default or None, max_length=max_length, required=True)
+        self.add_item(self.field)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        channel = _get_owned_temp_channel(interaction)
+        channel = await _room_or_reply(interaction)
         if channel is None:
-            await interaction.response.send_message("ادخل رومك المؤقت أولًا. هذه اللوحة تتحكم برومك فقط.", ephemeral=True)
             return
-        name = self.room_name.value.strip()
-        if not name:
-            await interaction.response.send_message("اكتب اسمًا صحيحًا.", ephemeral=True)
-            return
+        value = str(self.field.value).strip()
         try:
-            await channel.edit(name=f"🔊・{name}", reason="Rename temporary voice room from panel")
-            await interaction.response.send_message("تم تغيير اسم الروم.", ephemeral=True)
-        except discord.HTTPException:
-            await interaction.response.send_message("تعذر تغيير الاسم. تأكد من صلاحيات البوت.", ephemeral=True)
-
-
-class TempRoomLimitModal(discord.ui.Modal, title="تحديد عدد الأعضاء"):
-    limit = discord.ui.TextInput(label="عدد الأعضاء (0 إلى 99، والصفر بلا حد)", max_length=2, default="0")
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        channel = _get_owned_temp_channel(interaction)
-        if channel is None:
-            await interaction.response.send_message("ادخل رومك المؤقت أولًا.", ephemeral=True)
-            return
-        try:
-            amount = int(self.limit.value)
-            if not 0 <= amount <= 99:
-                raise ValueError
+            if self.field.custom_id == "room_name":
+                await channel.edit(name=f"🔊・{value[:90]}")
+                msg = "تم تغيير اسم الروم."
+            elif self.field.custom_id == "room_limit":
+                amount = int(value)
+                if not 0 <= amount <= 99:
+                    raise ValueError
+                await channel.edit(user_limit=amount)
+                msg = "تم تحديث حد الأعضاء. الصفر يعني بلا حد."
+            elif self.field.custom_id == "room_bitrate":
+                amount = int(value)
+                if not 8 <= amount <= 384:
+                    raise ValueError
+                await channel.edit(bitrate=amount * 1000)
+                msg = "تم تحديث جودة الصوت."
+            elif self.field.custom_id == "room_status":
+                await channel.edit(name=f"🔊・{value[:90]}")
+                msg = "تم تحديث حالة الروم في اسمه."
+            elif self.field.custom_id in {"room_trust", "room_untrust", "room_invite", "room_uninvite", "room_kick", "room_block", "room_unblock", "room_transfer"}:
+                try:
+                    user_id = int(value.replace("<@", "").replace("!", "").replace(">", ""))
+                except ValueError:
+                    await _reply(interaction, "اكتب آيدي العضو بالأرقام فقط.")
+                    return
+                member = channel.guild.get_member(user_id)
+                if member is None:
+                    try:
+                        member = await channel.guild.fetch_member(user_id)
+                    except discord.HTTPException:
+                        await _reply(interaction, "ما لقيت العضو في السيرفر.")
+                        return
+                overwrite = channel.overwrites_for(member)
+                action = self.field.custom_id
+                if action in {"room_trust", "room_invite"}:
+                    overwrite.view_channel = True
+                    overwrite.connect = True
+                    await channel.set_permissions(member, overwrite=overwrite, reason="إدارة الروم المؤقت")
+                    msg = "تم السماح للعضو بالدخول."
+                elif action == "room_untrust":
+                    overwrite.connect = False
+                    await channel.set_permissions(member, overwrite=overwrite, reason="إلغاء الثقة في الروم")
+                    msg = "تم منع العضو من الدخول."
+                elif action == "room_uninvite":
+                    await channel.set_permissions(member, overwrite=None, reason="إلغاء دعوة الروم")
+                    msg = "تم إلغاء صلاحيات العضو الخاصة."
+                elif action == "room_kick":
+                    if member.voice and member.voice.channel == channel:
+                        await member.move_to(None, reason="إخراج عضو من روم مؤقت")
+                    msg = "تم إخراج العضو إذا كان داخل الروم."
+                elif action == "room_block":
+                    overwrite.view_channel = False
+                    overwrite.connect = False
+                    await channel.set_permissions(member, overwrite=overwrite, reason="حظر عضو من الروم")
+                    msg = "تم حظر العضو من الروم."
+                elif action == "room_unblock":
+                    await channel.set_permissions(member, overwrite=None, reason="رفع الحظر عن الروم")
+                    msg = "تم رفع الحظر الخاص عن العضو."
+                else:
+                    current = _owner(channel)
+                    if current and current.id != interaction.user.id:
+                        await _reply(interaction, "الروم له مالك بالفعل. المالك الحالي فقط يقدر ينقل الملكية.")
+                        return
+                    old = current
+                    if old and old.id != member.id:
+                        old_ow = channel.overwrites_for(old)
+                        old_ow.manage_channels = False
+                        old_ow.move_members = False
+                        await channel.set_permissions(old, overwrite=old_ow)
+                    overwrite.view_channel = True
+                    overwrite.connect = True
+                    overwrite.manage_channels = True
+                    overwrite.move_members = True
+                    await channel.set_permissions(member, overwrite=overwrite, reason="نقل ملكية الروم")
+                    msg = f"تم نقل ملكية الروم إلى {member.mention}."
+            else:
+                msg = "تم."
+            await _reply(interaction, msg)
         except ValueError:
-            await interaction.response.send_message("اكتب رقمًا من 0 إلى 99.", ephemeral=True)
-            return
-        try:
-            await channel.edit(user_limit=amount, reason="Change temporary voice room user limit")
-            await interaction.response.send_message("تم تحديث عدد الأعضاء.", ephemeral=True)
+            await _reply(interaction, "القيمة غير صحيحة. تأكد من الرقم المطلوب.")
+        except discord.Forbidden:
+            await _reply(interaction, "البوت ما عنده صلاحية كافية لتنفيذ العملية.")
         except discord.HTTPException:
-            await interaction.response.send_message("تعذر تحديث عدد الأعضاء.", ephemeral=True)
+            logger.exception("Temporary voice panel action failed")
+            await _reply(interaction, "تعذر تنفيذ العملية. جرّب مرة ثانية.")
+
+
+class KnockModal(discord.ui.Modal, title="طلب دخول الروم"):
+    room_id = discord.ui.TextInput(label="آيدي الروم الصوتي", max_length=25)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            channel = interaction.guild.get_channel(int(self.room_id.value)) if interaction.guild else None
+            if not isinstance(channel, discord.VoiceChannel) or channel.id not in _all_temp_ids(interaction.client):
+                await _reply(interaction, "آيدي الروم غير صحيح أو ليس رومًا مؤقتًا.")
+                return
+            owner = _owner(channel)
+            if owner:
+                await owner.send(f"العضو {interaction.user.mention} يطلب الدخول إلى رومك {channel.mention}.")
+                await _reply(interaction, "أرسلنا طلبك لمالك الروم.")
+            else:
+                await _reply(interaction, "ما قدرنا نحدد مالك الروم.")
+        except discord.Forbidden:
+            await _reply(interaction, "تعذر إرسال الطلب؛ قد تكون الرسائل الخاصة مقفلة.")
+        except (ValueError, discord.HTTPException):
+            await _reply(interaction, "تعذر إرسال الطلب.")
 
 
 class TempVoicePanel(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="تغيير الاسم", style=discord.ButtonStyle.primary, custom_id="tempvoice:rename")
+    async def modal(self, interaction: discord.Interaction, title: str, label: str, custom_id: str, default: str = "") -> None:
+        if await _room_or_reply(interaction) is None:
+            return
+        await interaction.response.send_modal(ArabicRoomModal(title, label, custom_id, default=default))
+
+    @discord.ui.button(label="تغيير الاسم", emoji="✏️", style=discord.ButtonStyle.secondary, custom_id="tempvoice:rename", row=0)
     async def rename(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if _get_owned_temp_channel(interaction) is None:
-            await interaction.response.send_message("ادخل رومك المؤقت الذي تملكه أولًا.", ephemeral=True)
-            return
-        await interaction.response.send_modal(RenameTempRoomModal())
+        c = await _room_or_reply(interaction)
+        if c: await interaction.response.send_modal(ArabicRoomModal("تغيير اسم الروم", "الاسم الجديد", "room_name", default=c.name.replace("🔊・", "")))
 
-    @discord.ui.button(label="قفل / فتح", style=discord.ButtonStyle.secondary, custom_id="tempvoice:lock")
-    async def lock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        channel = _get_owned_temp_channel(interaction)
-        if channel is None:
-            await interaction.response.send_message("ادخل رومك المؤقت الذي تملكه أولًا.", ephemeral=True)
-            return
-        everyone = channel.guild.default_role
-        overwrite = channel.overwrites_for(everyone)
-        currently_locked = overwrite.connect is False
-        overwrite.connect = None if currently_locked else False
+    @discord.ui.button(label="حد الأعضاء", emoji="👥", style=discord.ButtonStyle.secondary, custom_id="tempvoice:limit", row=0)
+    async def limit(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        c = await _room_or_reply(interaction)
+        if c: await interaction.response.send_modal(ArabicRoomModal("حد الأعضاء", "عدد الأعضاء من 0 إلى 99", "room_limit", default=str(c.user_limit)))
+
+    @discord.ui.button(label="الخصوصية", emoji="🙈", style=discord.ButtonStyle.secondary, custom_id="tempvoice:privacy", row=0)
+    async def privacy(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        c = await _room_or_reply(interaction)
+        if not c: return
+        ow = c.overwrites_for(c.guild.default_role)
+        private = ow.view_channel is False
+        ow.view_channel = None if private else False
+        ow.connect = False if not private else None
         try:
-            await channel.set_permissions(everyone, overwrite=overwrite, reason="Lock or unlock temporary voice room")
-            await interaction.response.send_message("تم فتح الروم." if currently_locked else "تم قفل الروم.", ephemeral=True)
+            await c.set_permissions(c.guild.default_role, overwrite=ow)
+            await _reply(interaction, "تم جعل الروم عامًا." if private else "تم إخفاء الروم عن الأعضاء.")
+        except discord.HTTPException: await _reply(interaction, "تعذر تغيير الخصوصية.")
+
+    @discord.ui.button(label="دردشة الروم", emoji="💬", style=discord.ButtonStyle.secondary, custom_id="tempvoice:text", row=0)
+    async def text_chat(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        c = await _room_or_reply(interaction)
+        if not c: return
+        ow = c.overwrites_for(c.guild.default_role)
+        enabled = ow.send_messages is False
+        ow.send_messages = None if enabled else False
+        try:
+            await c.set_permissions(c.guild.default_role, overwrite=ow)
+            await _reply(interaction, "تم السماح بالدردشة." if enabled else "تم إيقاف الدردشة.")
+        except discord.HTTPException: await _reply(interaction, "تعذر تغيير صلاحية الدردشة.")
+
+    @discord.ui.button(label="المنطقة", emoji="🌐", style=discord.ButtonStyle.secondary, custom_id="tempvoice:region", row=1)
+    async def region(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        c = await _room_or_reply(interaction)
+        if not c: return
+        options = [discord.SelectOption(label="تلقائي", value="auto"), discord.SelectOption(label="البرازيل", value="brazil"), discord.SelectOption(label="هونغ كونغ", value="hongkong"), discord.SelectOption(label="الهند", value="india"), discord.SelectOption(label="اليابان", value="japan"), discord.SelectOption(label="سنغافورة", value="singapore"), discord.SelectOption(label="جنوب أفريقيا", value="southafrica"), discord.SelectOption(label="سيدني", value="sydney"), discord.SelectOption(label="أوروبا الغربية", value="rotterdam"), discord.SelectOption(label="الولايات المتحدة", value="us-central")]
+        view = RegionSelect(c.id, options)
+        await interaction.response.send_message("اختر منطقة الصوت:", view=view, ephemeral=True)
+
+    @discord.ui.button(label="جودة الصوت", emoji="📶", style=discord.ButtonStyle.secondary, custom_id="tempvoice:bitrate", row=1)
+    async def bitrate(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        c = await _room_or_reply(interaction)
+        if c: await interaction.response.send_modal(ArabicRoomModal("جودة الصوت", "معدل البت بالكيلوبت (8-384)", "room_bitrate", default=str(c.bitrate // 1000), max_length=3))
+
+    @discord.ui.button(label="قفل", emoji="🔒", style=discord.ButtonStyle.secondary, custom_id="tempvoice:lock", row=2)
+    async def lock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        c = await _room_or_reply(interaction)
+        if not c: return
+        ow = c.overwrites_for(c.guild.default_role)
+        locked = ow.connect is False
+        ow.connect = None if locked else False
+        try:
+            await c.set_permissions(c.guild.default_role, overwrite=ow)
+            await _reply(interaction, "تم فتح الروم." if locked else "تم قفل الروم.")
+        except discord.HTTPException: await _reply(interaction, "تعذر قفل الروم أو فتحه.")
+
+    @discord.ui.button(label="فتح", emoji="🔓", style=discord.ButtonStyle.secondary, custom_id="tempvoice:unlock", row=2)
+    async def unlock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        c = await _room_or_reply(interaction)
+        if not c: return
+        ow = c.overwrites_for(c.guild.default_role); ow.connect = None
+        try:
+            await c.set_permissions(c.guild.default_role, overwrite=ow); await _reply(interaction, "تم فتح الروم.")
+        except discord.HTTPException: await _reply(interaction, "تعذر فتح الروم.")
+
+    @discord.ui.button(label="وثوق", emoji="✅", style=discord.ButtonStyle.secondary, custom_id="tempvoice:trust", row=2)
+    async def trust(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.modal(interaction, "إضافة عضو موثوق", "آيدي العضو", "room_trust")
+
+    @discord.ui.button(label="إلغاء الوثوق", emoji="🚫", style=discord.ButtonStyle.secondary, custom_id="tempvoice:untrust", row=2)
+    async def untrust(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.modal(interaction, "إلغاء الوثوق", "آيدي العضو", "room_untrust")
+
+    @discord.ui.button(label="دعوة", emoji="➕", style=discord.ButtonStyle.secondary, custom_id="tempvoice:invite", row=3)
+    async def invite(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.modal(interaction, "دعوة عضو", "آيدي العضو", "room_invite")
+
+    @discord.ui.button(label="إلغاء الدعوة", emoji="➖", style=discord.ButtonStyle.secondary, custom_id="tempvoice:uninvite", row=3)
+    async def uninvite(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.modal(interaction, "إلغاء دعوة عضو", "آيدي العضو", "room_uninvite")
+
+    @discord.ui.button(label="طلب دخول", emoji="🔔", style=discord.ButtonStyle.secondary, custom_id="tempvoice:knock", row=3)
+    async def knock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(KnockModal())
+
+    @discord.ui.button(label="إخراج عضو", emoji="👋", style=discord.ButtonStyle.secondary, custom_id="tempvoice:kick", row=3)
+    async def kick(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.modal(interaction, "إخراج عضو", "آيدي العضو", "room_kick")
+
+    @discord.ui.button(label="حظر", emoji="⛔", style=discord.ButtonStyle.secondary, custom_id="tempvoice:block", row=4)
+    async def block(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.modal(interaction, "حظر عضو من الروم", "آيدي العضو", "room_block")
+
+    @discord.ui.button(label="رفع الحظر", emoji="☑️", style=discord.ButtonStyle.secondary, custom_id="tempvoice:unblock", row=4)
+    async def unblock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.modal(interaction, "رفع الحظر", "آيدي العضو", "room_unblock")
+
+    @discord.ui.button(label="استلام الملكية", emoji="👑", style=discord.ButtonStyle.secondary, custom_id="tempvoice:claim", row=4)
+    async def claim(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        member = interaction.user
+        c = member.voice.channel if isinstance(member, discord.Member) and member.voice else None
+        if not isinstance(c, discord.VoiceChannel) or c.id not in _all_temp_ids(interaction.client):
+            await _reply(interaction, "ادخل رومًا مؤقتًا أولًا.")
+            return
+        owner = _owner(c)
+        if owner and owner.id != member.id:
+            await _reply(interaction, "الروم له مالك بالفعل، ولا يمكن استلامه.")
+            return
+        ow = c.overwrites_for(member)
+        ow.view_channel = True; ow.connect = True; ow.manage_channels = True; ow.move_members = True
+        try:
+            await c.set_permissions(member, overwrite=ow)
+            await _reply(interaction, "أصبحت مالك الروم.")
         except discord.HTTPException:
-            await interaction.response.send_message("تعذر تغيير صلاحية الدخول للروم.", ephemeral=True)
+            await _reply(interaction, "تعذر استلام الملكية.")
 
-    @discord.ui.button(label="عدد الأعضاء", style=discord.ButtonStyle.secondary, custom_id="tempvoice:limit")
-    async def set_limit(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if _get_owned_temp_channel(interaction) is None:
-            await interaction.response.send_message("ادخل رومك المؤقت الذي تملكه أولًا.", ephemeral=True)
-            return
-        await interaction.response.send_modal(TempRoomLimitModal())
+    @discord.ui.button(label="نقل الملكية", emoji="🔁", style=discord.ButtonStyle.secondary, custom_id="tempvoice:transfer", row=4)
+    async def transfer(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.modal(interaction, "نقل ملكية الروم", "آيدي العضو الجديد", "room_transfer")
 
-    @discord.ui.button(label="حذف الروم", style=discord.ButtonStyle.danger, custom_id="tempvoice:delete")
+    @discord.ui.button(label="حذف الروم", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="tempvoice:delete", row=4)
     async def delete_room(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        channel = _get_owned_temp_channel(interaction)
-        if channel is None:
-            await interaction.response.send_message("ادخل رومك المؤقت الذي تملكه أولًا.", ephemeral=True)
-            return
+        c = await _room_or_reply(interaction)
+        if not c: return
         await interaction.response.send_message("جارٍ حذف رومك المؤقت.", ephemeral=True)
         try:
-            await channel.delete(reason=f"Temporary room deleted by {interaction.user}")
-        except discord.HTTPException:
-            logger.exception("Could not delete temporary room %s", channel.id)
+            cog = interaction.client.get_cog("TemporaryVoice")
+            if cog: cog.temporary_channel_ids.discard(c.id)
+            await c.delete(reason=f"حذف الروم بواسطة {interaction.user}")
+        except discord.HTTPException: logger.exception("Could not delete temporary room %s", c.id)
 
+    @discord.ui.button(label="إعادة ضبط", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="tempvoice:reset", row=4)
+    async def reset(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        c = await _room_or_reply(interaction)
+        if not c: return
+        owner = interaction.user
+        try:
+            for target in list(c.overwrites):
+                if isinstance(target, discord.Member) and target.id != owner.id:
+                    await c.set_permissions(target, overwrite=None)
+            ow = discord.PermissionOverwrite(view_channel=True, connect=True, manage_channels=True, move_members=True, mute_members=True, deafen_members=True)
+            await c.set_permissions(owner, overwrite=ow)
+            await c.set_permissions(c.guild.default_role, overwrite=discord.PermissionOverwrite(view_channel=True, connect=True, send_messages=None))
+            await c.edit(user_limit=0, bitrate=c.guild.bitrate_limit, rtc_region=None)
+            await _reply(interaction, "تمت إعادة ضبط إعدادات الروم.")
+        except (discord.HTTPException, AttributeError):
+            await _reply(interaction, "تعذر إعادة ضبط بعض الإعدادات. تحقق من صلاحيات البوت.")
+
+
+class RegionSelect(discord.ui.View):
+    def __init__(self, channel_id: int, options: list[discord.SelectOption]):
+        super().__init__(timeout=60)
+        self.channel_id = channel_id
+        select = discord.ui.Select(placeholder="اختر المنطقة", options=options, custom_id="tempvoice:region_select")
+        select.callback = self.select_region
+        self.add_item(select)
+
+    async def select_region(self, interaction: discord.Interaction) -> None:
+        channel = _get_owned_temp_channel(interaction)
+        if channel is None or channel.id != self.channel_id:
+            await _reply(interaction, "ادخل رومك المؤقت الذي تملكه.")
+            return
+        try:
+            await channel.edit(rtc_region=None if interaction.data["values"][0] == "auto" else interaction.data["values"][0])
+            await _reply(interaction, "تم تحديث منطقة الصوت.")
+        except discord.HTTPException:
+            await _reply(interaction, "تعذر تغيير المنطقة؛ قد لا تكون المنطقة مدعومة.")
 
 
 async def setup(bot: commands.Bot) -> None:

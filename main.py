@@ -45,9 +45,11 @@ logger = logging.getLogger("discord_music_bot")
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
+
+
 class MusicBot(commands.Bot):
     async def setup_hook(self) -> None:
-        # Load the temporary voice-room system before the bot connects.
+        # Load the temporary voice-room feature before connecting to Discord.
         await self.load_extension("temp_voice")
 
 
