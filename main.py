@@ -45,7 +45,15 @@ logger = logging.getLogger("discord_music_bot")
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
-bot = commands.Bot(command_prefix=get_command_prefix, intents=intents)
+
+
+class MusicBot(commands.Bot):
+    async def setup_hook(self) -> None:
+        # Load the temporary voice-room feature before connecting to Discord.
+        await self.load_extension("temp_voice")
+
+
+bot = MusicBot(command_prefix=get_command_prefix, intents=intents)
 
 BASE_YTDL = {
     "format": "bestaudio/best",
