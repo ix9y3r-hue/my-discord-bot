@@ -365,6 +365,119 @@ async def clear_panel(guild_id: int) -> None:
             pass
 
 
+QUEUE_PAGE_SIZE = 4
+
+
+class RemoveTrackButton(discord.ui.Button):
+    """زر ❌ جنبه اسم الأغنية؛ يشيلها من الطابور."""
+
+    def __init__(self, number: int, track: Track, row: int) -> None:
+        title = track["title"]
+        label = f"{number}. {title}"
+        if len(label) > 70:
+            label = label[:67] + "..."
+        super().__init__(
+            label=label,
+            emoji="❌",
+            style=discord.ButtonStyle.danger,
+            row=row,
+        )
+        self.track = track
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if isinstance(view, QueueView):
+            await view.remove_track(interaction, self.track)
+
+
+class QueueView(discord.ui.View):
+    def __init__(self, guild_id: int, page: int = 0) -> None:
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.page = page
+        self._build()
+
+    def _total_pages(self) -> int:
+        count = len(queues.get(self.guild_id, []))
+        return max(1, -(-count // QUEUE_PAGE_SIZE))
+
+    def _build(self) -> None:
+        self.clear_items()
+        queue = queues.get(self.guild_id, [])
+        pages = self._total_pages()
+        self.page = max(0, min(self.page, pages - 1))
+        start = self.page * QUEUE_PAGE_SIZE
+        for offset, (track, _channel) in enumerate(
+            queue[start:start + QUEUE_PAGE_SIZE]
+        ):
+            self.add_item(RemoveTrackButton(start + offset + 1, track, offset))
+        if pages > 1:
+            prev_button = discord.ui.Button(
+                emoji="◀️",
+                style=discord.ButtonStyle.secondary,
+                row=4,
+                disabled=self.page == 0,
+            )
+            prev_button.callback = self._prev_page
+            page_button = discord.ui.Button(
+                label=f"{self.page + 1}/{pages}",
+                style=discord.ButtonStyle.secondary,
+                row=4,
+                disabled=True,
+            )
+            next_button = discord.ui.Button(
+                emoji="▶️",
+                style=discord.ButtonStyle.secondary,
+                row=4,
+                disabled=self.page >= pages - 1,
+            )
+            next_button.callback = self._next_page
+            self.add_item(prev_button)
+            self.add_item(page_button)
+            self.add_item(next_button)
+
+    def content(self) -> str:
+        queue = queues.get(self.guild_id, [])
+        current = now_playing.get(self.guild_id)
+        heading = f"🎵 تعمل الآن: **{current['title']}**\n" if current else ""
+        if not queue:
+            return heading + "قائمة الانتظار فارغة."
+        return (
+            heading
+            + f"📜 **قائمة الانتظار** ({len(queue)} أغنية)\n"
+            + "اضغط ❌ جنب الأغنية عشان تشيلها."
+        )
+
+    async def _refresh(self, interaction: discord.Interaction) -> None:
+        self._build()
+        if self.children:
+            await interaction.response.edit_message(
+                content=self.content(), view=self
+            )
+        else:
+            await interaction.response.edit_message(
+                content=self.content(), view=None
+            )
+
+    async def _prev_page(self, interaction: discord.Interaction) -> None:
+        self.page -= 1
+        await self._refresh(interaction)
+
+    async def _next_page(self, interaction: discord.Interaction) -> None:
+        self.page += 1
+        await self._refresh(interaction)
+
+    async def remove_track(
+        self, interaction: discord.Interaction, track: Track
+    ) -> None:
+        queue = queues.get(self.guild_id, [])
+        for index, (queued_track, _channel) in enumerate(queue):
+            if queued_track is track:
+                del queue[index]
+                break
+        await self._refresh(interaction)
+
+
 class PlayerView(discord.ui.View):
     def __init__(self, guild_id: int, embed: discord.Embed) -> None:
         super().__init__(timeout=None)
@@ -505,9 +618,15 @@ class PlayerView(discord.ui.View):
     async def queue_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        await interaction.response.send_message(
-            queue_text(self.guild_id), ephemeral=True
-        )
+        view = QueueView(self.guild_id)
+        if view.children:
+            await interaction.response.send_message(
+                view.content(), view=view, ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                view.content(), ephemeral=True
+            )
 
     @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=1)
     async def volume_up_button(
