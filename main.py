@@ -1161,6 +1161,100 @@ async def setup_voice_stats(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=embed)
 
 
+
+
+@bot.tree.command(name="حذف", description="حذف رسائل حسب العدد أو العضو أو الروم")
+@discord.app_commands.guild_only()
+@discord.app_commands.describe(
+    العدد="عدد الرسائل (اختياري، من 1 إلى 100). إذا تركته مع العضو أو الروم فسيحذف كل الرسائل المطابقة",
+    العضو="اختياري: حذف رسائل هذا العضو فقط",
+    الروم="اختياري: الروم الذي تريد الحذف منه، وإلا فالروم الحالي",
+)
+@discord.app_commands.default_permissions(manage_messages=True)
+async def delete_messages(
+    interaction: discord.Interaction,
+    العدد: discord.app_commands.Range[int, 1, 100] | None = None,
+    العضو: discord.Member | None = None,
+    الروم: discord.TextChannel | None = None,
+) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message("هذا الأمر يعمل داخل السيرفر فقط.", ephemeral=True)
+        return
+    if not interaction.user.guild_permissions.manage_messages:
+        await interaction.response.send_message(
+            "تحتاج صلاحية **إدارة الرسائل (Manage Messages)** لاستخدام الأمر.",
+            ephemeral=True,
+        )
+        return
+
+    target = الروم or interaction.channel
+    if not isinstance(target, discord.TextChannel):
+        await interaction.response.send_message("حدد رومًا نصيًا صالحًا.", ephemeral=True)
+        return
+
+    bot_member = guild.me
+    permissions = target.permissions_for(bot_member) if bot_member else None
+    if not permissions or not permissions.view_channel or not permissions.read_message_history or not permissions.manage_messages:
+        await interaction.response.send_message(
+            f"أحتاج في {target.mention} صلاحيات عرض الروم وقراءة سجل الرسائل وإدارة الرسائل.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        # إذا لم يحدد المستخدم العدد، فوجود عضو أو روم يعني حذف كل الرسائل المطابقة.
+        # أما /حذف بلا أي خيارات فيحذف آخر 100 رسالة فقط لتجنب حذف الروم كاملًا بالخطأ.
+        limit = العدد if العدد is not None else (100 if العضو is None and الروم is None else None)
+        matches: list[discord.Message] = []
+        async for message in target.history(limit=None):
+            if العضو is None or message.author.id == العضو.id:
+                matches.append(message)
+                if limit is not None and len(matches) >= limit:
+                    break
+
+        if not matches:
+            await interaction.followup.send("ما لقيت رسائل مطابقة للحذف.", ephemeral=True)
+            return
+
+        # Discord لا يسمح بالحذف الجماعي للرسائل الأقدم من 14 يومًا.
+        now = discord.utils.utcnow()
+        recent = [m for m in matches if (now - m.created_at).days < 14]
+        old = [m for m in matches if (now - m.created_at).days >= 14]
+
+        deleted_count = 0
+        if recent:
+            for start in range(0, len(recent), 100):
+                batch = recent[start:start + 100]
+                if len(batch) == 1:
+                    await batch[0].delete()
+                else:
+                    await target.delete_messages(batch)
+                deleted_count += len(batch)
+        for message in old:
+            await message.delete()
+            deleted_count += 1
+
+        who = f" للعضو {العضو.mention}" if العضو else ""
+        await interaction.followup.send(
+            f"تم حذف **{deleted_count}** رسالة من {target.mention}{who}.",
+            ephemeral=True,
+        )
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "ما قدرت أحذف الرسائل. تأكد أن رتبة البوت تسمح له بإدارة الرسائل في هذا الروم.",
+            ephemeral=True,
+        )
+    except discord.HTTPException:
+        logger.exception("Message deletion failed")
+        await interaction.followup.send(
+            "صار خطأ أثناء الحذف؛ قد تكون بعض الرسائل حُذفت بالفعل. تحقق من صلاحيات البوت وحاول مرة ثانية.",
+            ephemeral=True,
+        )
+
+
+
 @bot.command(name="ادخل")
 @commands.guild_only()
 async def join_voice(ctx: commands.Context) -> None:
