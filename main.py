@@ -898,14 +898,7 @@ async def on_ready() -> None:
         logger.info("تم مزامنة %s من أوامر السلاش", len(synced))
     except Exception:
         logger.exception("تعذرت مزامنة أوامر السلاش")
-    env_channel = os.getenv("VOICE_CHANNEL_ID")
-    if env_channel and env_channel.isdigit():
-        channel = bot.get_channel(int(env_channel))
-        if (
-            isinstance(channel, (discord.VoiceChannel, discord.StageChannel))
-            and channel.guild.id not in voice_targets
-        ):
-            set_target(channel.guild.id, channel.id)
+    # أعد تشغيل مراقبة الاتصال لضمان رجوع البوت للروم المحفوظ بعد الانقطاع أو إعادة التشغيل.
     if not voice_watchdog.is_running():
         voice_watchdog.start()
 
@@ -949,12 +942,10 @@ async def on_voice_state_update(
                 stats_active_channels.setdefault(guild_id, set()).discard(channel.id)
         save_voice_stats()
 
-    if not bot.user or member.id != bot.user.id or before.channel == after.channel:
-        return
-    target_id = voice_targets.get(guild_id)
-    if target_id is None or (after.channel and after.channel.id == target_id):
-        return
-    ensure_reconnect(guild_id)
+    # إذا كان الحدث يخص البوت نفسه، أعد الاتصال بالروم المحفوظ عند الانفصال أو النقل.
+    # أمر !اخرج يمسح الهدف المحفوظ أولًا، لذلك لن يعيده البوت بعد استخدام الأمر.
+    if bot.user and member.id == bot.user.id and before.channel != after.channel:
+        ensure_reconnect(guild_id)
 
 
 class RoleCreateModal(discord.ui.Modal, title="إنشاء رتبتك الخاصة"):
