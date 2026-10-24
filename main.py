@@ -60,10 +60,23 @@ BASE_YTDL = {
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
+    # Railway/container IPv4 is generally more reliable for media hosts.
     "source_address": "0.0.0.0",
+    "socket_timeout": 25,
+    "retries": 3,
+    "extractor_retries": 3,
+    "fragment_retries": 3,
 }
 ytdl_search = yt_dlp.YoutubeDL({**BASE_YTDL, "extract_flat": "in_playlist"})
 ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
+# Fallback client can work when YouTube rejects yt-dlp's default player client.
+YOUTUBE_FALLBACK_ARGS = {"youtube": {"player_client": ["tv", "web_safari"]}}
+ytdl_search_fallback = yt_dlp.YoutubeDL({
+    **BASE_YTDL, "extract_flat": "in_playlist", "extractor_args": YOUTUBE_FALLBACK_ARGS
+})
+ytdl_stream_fallback = yt_dlp.YoutubeDL({
+    **BASE_YTDL, "extractor_args": YOUTUBE_FALLBACK_ARGS
+})
 ytdl_lock = asyncio.Lock()
 
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
@@ -276,10 +289,32 @@ voice_reconnect_tasks: dict[int, asyncio.Task[None]] = {}
 async def extract_info(query: str, *, flat: bool = False) -> dict[str, Any] | None:
     ydl = ytdl_search if flat else ytdl_stream
     async with ytdl_lock:
-        return await asyncio.wait_for(
-            asyncio.to_thread(ydl.extract_info, query, download=False),
-            timeout=EXTRACT_TIMEOUT,
-        )
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(ydl.extract_info, query, download=False),
+                timeout=EXTRACT_TIMEOUT,
+            )
+        except Exception as first_error:
+            # Retry YouTube stream extraction with alternate player clients. This
+            # can recover links rejected by YouTube's default client; it cannot
+            # override every IP-based block or private/age-restricted video.
+            is_youtube = any(host in query.lower() for host in (
+                "youtube.com", "youtu.be", "youtube-nocookie.com"
+            ))
+            if not is_youtube:
+                raise
+            logger.warning(
+                "Default YouTube extraction failed; trying alternate player clients: %s",
+                first_error,
+            )
+            fallback_ydl = ytdl_search_fallback if flat else ytdl_stream_fallback
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(fallback_ydl.extract_info, query, download=False),
+                    timeout=EXTRACT_TIMEOUT,
+                )
+            except Exception:
+                raise first_error
 
 
 def build_queries(search: str) -> list[str]:
