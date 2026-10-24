@@ -69,14 +69,25 @@ BASE_YTDL = {
 }
 ytdl_search = yt_dlp.YoutubeDL({**BASE_YTDL, "extract_flat": "in_playlist"})
 ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
-# Fallback client can work when YouTube rejects yt-dlp's default player client.
-YOUTUBE_FALLBACK_ARGS = {"youtube": {"player_client": ["tv", "web_safari"]}}
-ytdl_search_fallback = yt_dlp.YoutubeDL({
-    **BASE_YTDL, "extract_flat": "in_playlist", "extractor_args": YOUTUBE_FALLBACK_ARGS
-})
-ytdl_stream_fallback = yt_dlp.YoutubeDL({
-    **BASE_YTDL, "extractor_args": YOUTUBE_FALLBACK_ARGS
-})
+# Try different official YouTube player clients if the default extraction fails.
+# They have different format availability, so trying them separately is more useful
+# than combining them into one extractor configuration.
+YOUTUBE_FALLBACK_CLIENTS = ("tv", "android_vr", "web_safari")
+ytdl_search_fallbacks = [
+    yt_dlp.YoutubeDL({
+        **BASE_YTDL,
+        "extract_flat": "in_playlist",
+        "extractor_args": {"youtube": {"player_client": [client]}},
+    })
+    for client in YOUTUBE_FALLBACK_CLIENTS
+]
+ytdl_stream_fallbacks = [
+    yt_dlp.YoutubeDL({
+        **BASE_YTDL,
+        "extractor_args": {"youtube": {"player_client": [client]}},
+    })
+    for client in YOUTUBE_FALLBACK_CLIENTS
+]
 ytdl_lock = asyncio.Lock()
 
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
@@ -286,35 +297,53 @@ def set_target(guild_id: int, channel_id: int | None) -> None:
 voice_reconnect_tasks: dict[int, asyncio.Task[None]] = {}
 
 
+def is_youtube_query(query: str) -> bool:
+    lowered = query.lower()
+    return (
+        any(host in lowered for host in (
+            "youtube.com", "youtu.be", "youtube-nocookie.com"
+        ))
+        or lowered.startswith(("ytsearch", "youtube:"))
+    )
+
+
 async def extract_info(query: str, *, flat: bool = False) -> dict[str, Any] | None:
-    ydl = ytdl_search if flat else ytdl_stream
+    default_ydl = ytdl_search if flat else ytdl_stream
+    fallback_clients = ytdl_search_fallbacks if flat else ytdl_stream_fallbacks
     async with ytdl_lock:
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(ydl.extract_info, query, download=False),
+                asyncio.to_thread(default_ydl.extract_info, query, download=False),
                 timeout=EXTRACT_TIMEOUT,
             )
         except Exception as first_error:
-            # Retry YouTube stream extraction with alternate player clients. This
-            # can recover links rejected by YouTube's default client; it cannot
-            # override every IP-based block or private/age-restricted video.
-            is_youtube = any(host in query.lower() for host in (
-                "youtube.com", "youtu.be", "youtube-nocookie.com"
-            ))
-            if not is_youtube:
+            if not is_youtube_query(query):
                 raise
             logger.warning(
                 "Default YouTube extraction failed; trying alternate player clients: %s",
                 first_error,
             )
-            fallback_ydl = ytdl_search_fallback if flat else ytdl_stream_fallback
-            try:
-                return await asyncio.wait_for(
-                    asyncio.to_thread(fallback_ydl.extract_info, query, download=False),
-                    timeout=EXTRACT_TIMEOUT,
-                )
-            except Exception:
-                raise first_error
+            last_error: Exception = first_error
+            for client, fallback_ydl in zip(YOUTUBE_FALLBACK_CLIENTS, fallback_clients):
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            fallback_ydl.extract_info, query, download=False
+                        ),
+                        timeout=EXTRACT_TIMEOUT,
+                    )
+                    if result:
+                        logger.info("YouTube extraction succeeded using client %s", client)
+                        return result
+                except Exception as fallback_error:
+                    last_error = fallback_error
+                    logger.warning(
+                        "YouTube extraction with client %s failed: %s",
+                        client, fallback_error,
+                    )
+            # Keep the original exception as the final error: it is usually the
+            # clearest explanation of the initial failure (e.g. bot verification).
+            raise first_error
 
 
 def build_queries(search: str) -> list[str]:
@@ -755,13 +784,20 @@ async def play_next(guild: discord.Guild) -> None:
                     last_announced[guild.id] = track
                     await show_panel(guild, requester_channel, track, stream)
                 return
-            except Exception:
+            except Exception as playback_error:
                 logger.exception("Could not play track: %s", track["title"])
                 if now_playing.get(guild.id) is track:
                     now_playing.pop(guild.id, None)
+                error_text = str(playback_error).lower()
+                if "sign in to confirm you're not a bot" in error_text or "confirm you're not a bot" in error_text:
+                    reason = "يوتيوب طلب تحققًا من البوت، وجربت أكثر من طريقة لاستخراج الصوت لكنها لم تنجح."
+                elif "http error 403" in error_text or "status code 403" in error_text:
+                    reason = "يوتيوب رفض الوصول إلى رابط البث. قد يكون التقييد من يوتيوب أو من عنوان استضافة البوت."
+                else:
+                    reason = "فشل استخراج الصوت من الرابط."
                 await send_safely(
                     requester_channel,
-                    f"تعذر تشغيل **{track['title']}**؛ سأنتقل للأغنية التالية.",
+                    f"تعذر تشغيل **{track['title']}**. {reason} سأنتقل للأغنية التالية.",
                 )
         now_playing.pop(guild.id, None)
         await clear_panel(guild.id)
