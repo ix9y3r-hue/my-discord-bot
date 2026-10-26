@@ -8,7 +8,6 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# JavaScript runtime used by yt-dlp for YouTube player challenges.
 RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
     && deno --version
 
