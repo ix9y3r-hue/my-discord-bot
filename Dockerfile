@@ -8,7 +8,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# yt-dlp uses a JavaScript runtime to solve YouTube player challenges.
+# JavaScript runtime used by yt-dlp for YouTube player challenges.
 RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
     && deno --version
 
@@ -16,6 +16,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
-COPY main.py temp_voice.py ./
+COPY main.py temp_voice.py patch_main.py ./
+RUN python patch_main.py
+
 EXPOSE 8080
-CMD ["python", "main.py"] 
+CMD ["python", "main.py"]
