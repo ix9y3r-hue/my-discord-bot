@@ -244,8 +244,7 @@ async def graceful_shutdown(signum: int) -> None:
     try:
         await asyncio.wait_for(
             notify_all_guilds(
-                "سيتم إيقاف البوت مؤقتًا بسبب إعادة تشغيل أو تحديث من الاستضافة. "
-                "سيحاول Railway تشغيله تلقائيًا، وستصلك إشعار عودته عند اتصاله."
+                "سيُعاد تشغيل البوت الآن، وسيعود تلقائيًا بعد التحديث."
             ),
             timeout=4.0,
         )
@@ -1456,8 +1455,7 @@ async def on_ready() -> None:
         STARTUP_NOTIFICATION_SENT = True
         GATEWAY_DISCONNECTED = False
         await notify_all_guilds(
-            "تم تشغيل البوت أو إعادة تشغيله، وهو متصل الآن. "
-            "إذا كان قد توقف أو أعادت الاستضافة تشغيله، فقد عاد للعمل."
+            "عاد البوت للعمل وهو متصل الآن."
         )
     elif GATEWAY_DISCONNECTED and not SHUTDOWN_REQUESTED:
         GATEWAY_DISCONNECTED = False
