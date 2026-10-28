@@ -89,7 +89,7 @@ ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
 # Try different official YouTube player clients if the default extraction fails.
 # They have different format availability, so trying them separately is more useful
 # than combining them into one extractor configuration.
-YOUTUBE_FALLBACK_CLIENTS = ("web_safari", "web_embedded", "android_vr")
+YOUTUBE_FALLBACK_CLIENTS = ("tv_embedded", "android_vr", "web_embedded")
 ytdl_search_fallbacks = [
     yt_dlp.YoutubeDL({
         **BASE_YTDL,
