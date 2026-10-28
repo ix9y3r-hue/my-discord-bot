@@ -378,6 +378,7 @@ async def extract_info(query: str, *, flat: bool = False) -> dict[str, Any] | No
             )
             last_error: Exception = first_error
             for client, fallback_ydl in zip(YOUTUBE_FALLBACK_CLIENTS, fallback_clients):
+                try:
                     result = await asyncio.wait_for(
                         asyncio.to_thread(
                             fallback_ydl.extract_info, query, download=False
