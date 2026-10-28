@@ -386,17 +386,21 @@ async def publish_weekly_stats(guild: discord.Guild, record: dict[str, Any]) -> 
         return
 
     excluded_channel_ids = excluded_temporary_voice_channel_ids(guild)
-    # Ignore any old activity accumulated for temporary rooms before this fix.
-    totals = {
-        str(k): float(v)
-        for k, v in record.get("seconds", {}).items()
-        if int(k) not in excluded_channel_ids
-    }
-    channel_ids = {
+    # Only rank voice/stage channels that currently exist and are not temporary.
+    # This also removes stale IDs from deleted temporary rooms left in older stats.
+    eligible_channel_ids = {
         channel.id for channel in guild.channels
         if isinstance(channel, (discord.VoiceChannel, discord.StageChannel))
         and channel.id not in excluded_channel_ids
-    } | {int(k) for k in totals}
+    }
+    stored_seconds = record.get("seconds", {})
+    record["seconds"] = {
+        str(channel_id): float(seconds)
+        for channel_id, seconds in stored_seconds.items()
+        if str(channel_id).isdigit() and int(channel_id) in eligible_channel_ids
+    }
+    totals = record["seconds"]
+    channel_ids = eligible_channel_ids
     ranked = sorted(
         ((voice_channel_id, totals.get(str(voice_channel_id), 0.0)) for voice_channel_id in channel_ids),
         key=lambda item: item[1],
