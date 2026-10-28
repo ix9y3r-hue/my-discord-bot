@@ -17,7 +17,6 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           COMMIT_TITLE: ${{ github.event.head_commit.message || 'تحديث يدوي للمشروع' }}
-          COMMIT_URL: ${{ github.event.head_commit.url || github.server_url }}
         run: |
           if [ -z "$DISCORD_WEBHOOK_URL" ]; then
             echo "::error::Missing DISCORD_WEBHOOK_URL repository secret."
@@ -32,14 +31,12 @@ jobs:
           title = os.environ.get("COMMIT_TITLE", "تحديث جديد")
           # Discord embed field limits: keep commit titles safely bounded.
           title = title[:240]
-          url = os.environ.get("COMMIT_URL", "")
           payload = {
               "username": "سجل تحديثات البوت",
               "embeds": [{
                   "title": "تم نشر تحديث جديد للبوت",
                   "description": f"**التغييرات:**\\n{title}\\n\\nسيُعاد تشغيل البوت تلقائيًا لتطبيق التحديث.",
                   "color": 5793266,
-                  "url": url or None,
                   "footer": {"text": "إشعار تلقائي من GitHub Actions"},
               }],
               "allowed_mentions": {"parse": []},
