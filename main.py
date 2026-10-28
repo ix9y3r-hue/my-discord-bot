@@ -240,16 +240,7 @@ async def notify_all_guilds(message: str) -> None:
 
 
 async def graceful_shutdown(signum: int) -> None:
-    logger.warning("Received signal %s; sending shutdown notifications", signum)
-    try:
-        await asyncio.wait_for(
-            notify_all_guilds(
-                "سيُعاد تشغيل البوت الآن، وسيعود تلقائيًا بعد التحديث."
-            ),
-            timeout=4.0,
-        )
-    except Exception:
-        logger.exception("Could not complete shutdown notifications in time")
+    logger.warning("Received signal %s; shutting down gracefully", signum)
     try:
         await bot.close()
     except Exception:
@@ -1455,7 +1446,7 @@ async def on_ready() -> None:
         STARTUP_NOTIFICATION_SENT = True
         GATEWAY_DISCONNECTED = False
         await notify_all_guilds(
-            "عاد البوت للعمل وهو متصل الآن."
+            "عاد البوت للعمل بعد إعادة التشغيل أو التحديث."
         )
     elif GATEWAY_DISCONNECTED and not SHUTDOWN_REQUESTED:
         GATEWAY_DISCONNECTED = False
