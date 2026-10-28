@@ -1216,12 +1216,11 @@ async def advance_after_track(
         not finished_ok
         and guild.id not in skipped_guilds
         and is_youtube_query(finished_track.get("webpage", ""))
-        and not finished_track.get("requested_direct_youtube")
     ):
         retry_count = int(finished_track.get("youtube_playback_retries", "0"))
         attempted_client = finished_track.get("youtube_client")
 
-        if retry_count < 2:
+        if retry_count < 2 and not finished_track.get("requested_direct_youtube"):
             retry_track: Track = {
                 **finished_track,
                 "youtube_client": "mweb",
@@ -1230,7 +1229,10 @@ async def advance_after_track(
             queues.setdefault(guild.id, []).insert(0, (retry_track, requester_channel))
             logger.info("Refreshing failed YouTube stream for %s (attempt %s/2)", finished_track.get("title", "unknown"), retry_count + 1)
         else:
-            if attempted_client in YOUTUBE_FALLBACK_CLIENTS:
+            if finished_track.get("requested_direct_youtube"):
+                # Do not retry YouTube for a failed direct link; go straight to SoundCloud.
+                next_index = len(YOUTUBE_FALLBACK_CLIENTS)
+            elif attempted_client in YOUTUBE_FALLBACK_CLIENTS:
                 next_index = YOUTUBE_FALLBACK_CLIENTS.index(attempted_client) + 1
             else:
                 next_index = 0
