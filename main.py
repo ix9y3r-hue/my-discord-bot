@@ -628,7 +628,10 @@ async def find_named_fallback(title: str, *, prefer_soundcloud: bool = False) ->
     return None
 
 
-async def find_track(search: str) -> Track:
+async def find_track(
+    search: str,
+    status_channel: discord.abc.Messageable | None = None,
+) -> Track:
     last_error: Exception | None = None
     direct_youtube_url = search.startswith(("http://", "https://")) and is_youtube_query(search)
 
@@ -651,8 +654,13 @@ async def find_track(search: str) -> Track:
             track["requested_direct_youtube"] = "true"
         return track
 
-    # If a direct YouTube link fails, use its public title and search SoundCloud first.
+    # If a direct YouTube link fails, tell the requester and search SoundCloud immediately.
     if direct_youtube_url:
+        if status_channel is not None:
+            await send_safely(
+                status_channel,
+                "ما حصلت الأغنية في يوتيوب، بدور عليها في ساوند كلاود...",
+            )
         title = await youtube_title_from_oembed(search)
         if title:
             fallback = await find_named_fallback(title, prefer_soundcloud=True)
@@ -2107,7 +2115,7 @@ async def play_song(ctx: commands.Context, *, search: str | None = None) -> None
     stop_join_sound(ctx.guild, voice_client)
     await ctx.send(f"أبحث عن **{search}**...")
     try:
-        track = await find_track(search)
+        track = await find_track(search, status_channel=ctx.channel)
     except ValueError as exc:
         await ctx.send(str(exc))
         return
