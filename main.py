@@ -89,7 +89,7 @@ ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
 # Try different official YouTube player clients if the default extraction fails.
 # They have different format availability, so trying them separately is more useful
 # than combining them into one extractor configuration.
-YOUTUBE_FALLBACK_CLIENTS = ("tv", "android_vr", "web_safari")
+YOUTUBE_FALLBACK_CLIENTS = ("web_safari", "web_embedded", "android_vr")
 ytdl_search_fallbacks = [
     yt_dlp.YoutubeDL({
         **BASE_YTDL,
@@ -458,37 +458,21 @@ async def find_track(search: str) -> Track:
             continue
         return {"title": data.get("title") or "أغنية بدون اسم", "webpage": webpage}
 
-    # When YouTube blocks the server with its anti-bot check, a direct URL cannot
-    # be extracted by yt-dlp. Try its public oEmbed title, then find a playable
-    # SoundCloud copy rather than incorrectly telling the user the song doesn't exist.
-    if direct_youtube_url:
-        title = await youtube_title_from_oembed(search)
-        if title:
-            try:
-                fallback = await extract_info(f"scsearch1:{title}", flat=True)
-                if fallback and fallback.get("entries") is not None:
-                    fallback = next((entry for entry in fallback["entries"] if entry), None)
-                if fallback:
-                    fallback_url = fallback.get("webpage_url") or fallback.get("url")
-                    if fallback_url:
-                        logger.info("Using SoundCloud fallback for blocked YouTube URL: %s", title)
-                        return {
-                            "title": fallback.get("title") or title,
-                            "webpage": fallback_url,
-                            "requested_youtube_url": search,
-                        }
-            except Exception as exc:
-                logger.warning("SoundCloud fallback search failed for YouTube title %s: %s", title, exc)
+    # A direct YouTube URL must remain a YouTube source. Do not silently
+    # replace the user's requested video with an unrelated SoundCloud result.
 
     if last_error:
         logger.error("All searches failed", exc_info=last_error)
         error_text = str(last_error).lower()
-        if direct_youtube_url and ("sign in to confirm" in error_text or "not a bot" in error_text):
-            if not YOUTUBE_COOKIES:
-                raise ValueError(
-                    "يوتيوب يمنع التشغيل من سيرفر البوت حاليًا. لم أجد نسخة بديلة قابلة للتشغيل. "
-                    "يمكن تفعيل دعم يوتيوب بإضافة متغير YOUTUBE_COOKIES في Railway."
-                )
+        if direct_youtube_url and any(marker in error_text for marker in (
+            "sign in to confirm", "not a bot", "page needs to be reloaded",
+            "http error 403", "status code 403", "requested format is not available",
+        )):
+            raise ValueError(
+                "تعذر استخراج صوت رابط يوتيوب من استضافة البوت بعد تجربة طرق التشغيل المتاحة. "
+                "لم أستبدل الرابط بمصدر آخر. قد يكون السبب تقييدًا من يوتيوب أو الحاجة إلى "
+                "تحديث طريقة الاستخراج."
+            )
     raise ValueError("ما لقيت الأغنية أو تعذر الوصول إليها. جرّب رابطًا آخر.")
 
 
@@ -885,6 +869,7 @@ async def play_next(guild: discord.Guild) -> None:
             return
         while queue:
             track, requester_channel = queue.pop(0)
+            stream: dict[str, Any] | None = None
             try:
                 selected_client = track.get("youtube_client")
                 if selected_client and is_youtube_query(track.get("webpage", "")):
@@ -950,43 +935,31 @@ async def play_next(guild: discord.Guild) -> None:
                 if now_playing.get(guild.id) is track:
                     now_playing.pop(guild.id, None)
                 error_text = str(playback_error).lower()
-                # If YouTube extraction or FFmpeg setup fails before playback starts,
-                # queue a SoundCloud alternative instead of ending the queue and
-                # removing the player panel.
-                if (
-                    is_youtube_query(track.get("webpage", ""))
-                    and not track.get("soundcloud_fallback_tried")
-                ):
-                    try:
-                        fallback_data = await extract_info(
-                            f"scsearch1:{track.get('title', '')}", flat=True
+                # Keep YouTube requests on YouTube. If an explicitly selected
+                # client fails during extraction, try the next supported client.
+                if is_youtube_query(track.get("webpage", "")):
+                    selected_client = track.get("youtube_client")
+                    if selected_client in YOUTUBE_FALLBACK_CLIENTS:
+                        next_index = YOUTUBE_FALLBACK_CLIENTS.index(selected_client) + 1
+                    elif stream is not None:
+                        # Extraction succeeded but FFmpeg/source setup failed.
+                        next_index = 0
+                    else:
+                        # extract_info already tried the configured fallback clients.
+                        next_index = len(YOUTUBE_FALLBACK_CLIENTS)
+
+                    if next_index < len(YOUTUBE_FALLBACK_CLIENTS):
+                        retry_track: Track = {
+                            **track,
+                            "youtube_client": YOUTUBE_FALLBACK_CLIENTS[next_index],
+                        }
+                        queues.setdefault(guild.id, []).insert(0, (retry_track, requester_channel))
+                        await send_safely(
+                            requester_channel,
+                            f"تعذر تشغيل رابط يوتيوب بالطريقة الحالية؛ أجرب طريقة يوتيوب بديلة "
+                            f"({next_index + 1}/{len(YOUTUBE_FALLBACK_CLIENTS)}).",
                         )
-                        if fallback_data and fallback_data.get("entries") is not None:
-                            fallback_data = next(
-                                (entry for entry in fallback_data["entries"] if entry), None
-                            )
-                        if fallback_data:
-                            fallback_url = fallback_data.get("webpage_url") or fallback_data.get("url")
-                            if fallback_url and fallback_url.startswith("http"):
-                                queues.setdefault(guild.id, []).insert(
-                                    0,
-                                    ({
-                                        "title": fallback_data.get("title") or track.get("title", "أغنية"),
-                                        "webpage": fallback_url,
-                                        "requester": track.get("requester", ""),
-                                        "soundcloud_fallback_tried": "1",
-                                    }, requester_channel),
-                                )
-                                await send_safely(
-                                    requester_channel,
-                                    "تعذر تشغيل رابط يوتيوب؛ أجرب الآن نسخة بديلة من SoundCloud.",
-                                )
-                                continue
-                    except Exception as fallback_error:
-                        logger.warning(
-                            "Pre-play SoundCloud fallback failed for %s: %s",
-                            track.get("title", "unknown track"), fallback_error,
-                        )
+                        continue
                 if "sign in to confirm you're not a bot" in error_text or "confirm you're not a bot" in error_text:
                     reason = "يوتيوب طلب تحققًا من البوت، وجربت أكثر من طريقة لاستخراج الصوت لكنها لم تنجح."
                 elif "http error 403" in error_text or "status code 403" in error_text:
@@ -1030,35 +1003,12 @@ async def advance_after_track(
                 requester_channel,
                 f"تعذر تشغيل رابط يوتيوب بالطريقة الحالية؛ أجرب طريقة بديلة ({next_index + 1}/{len(YOUTUBE_FALLBACK_CLIENTS)}).",
             )
-        elif not finished_track.get("soundcloud_fallback_tried"):
-            try:
-                search_result = await extract_info(
-                    f"scsearch1:{finished_track.get('title', '')}", flat=True
-                )
-                if search_result and search_result.get("entries") is not None:
-                    search_result = next(
-                        (entry for entry in search_result["entries"] if entry), None
-                    )
-                if search_result:
-                    fallback_url = search_result.get("webpage_url") or search_result.get("url")
-                    if fallback_url and fallback_url.startswith("http"):
-                        fallback_track: Track = {
-                            "title": search_result.get("title") or finished_track.get("title", "أغنية"),
-                            "webpage": fallback_url,
-                            "requester": finished_track.get("requester", ""),
-                            "soundcloud_fallback_tried": "1",
-                        }
-                        queues.setdefault(guild.id, []).insert(0, (fallback_track, requester_channel))
-                        await send_safely(
-                            requester_channel,
-                            "تعذر تشغيل يوتيوب بعد تجربة الطرق البديلة؛ أجرب الآن نسخة من SoundCloud.",
-                        )
-            except Exception as fallback_error:
-                logger.warning(
-                    "SoundCloud fallback failed for %s: %s",
-                    finished_track.get("title", "unknown track"),
-                    fallback_error,
-                )
+        else:
+            await send_safely(
+                requester_channel,
+                "تعذر تشغيل رابط يوتيوب بعد تجربة طرق التشغيل البديلة. "
+                "لم أستبدل الرابط بمصدر آخر؛ جرّب إعادة المحاولة لاحقًا.",
+            )
 
     if now_playing.get(guild.id) is finished_track:
         now_playing.pop(guild.id, None)
