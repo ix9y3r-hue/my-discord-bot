@@ -28,16 +28,28 @@ jobs:
           import os
           import urllib.request
 
-          title = os.environ.get("COMMIT_TITLE", "تحديث جديد")
-          # Discord embed field limits: keep commit titles safely bounded.
-          title = title[:240]
+          title = os.environ.get("COMMIT_TITLE", "تحديث جديد للبوت").splitlines()[0][:240]
+          # Translate the actual commit summary into Arabic; use an Arabic fallback if unavailable.
+          try:
+              query = urllib.parse.urlencode({
+                  "client": "gtx", "sl": "auto", "tl": "ar", "dt": "t", "q": title
+              })
+              with urllib.request.urlopen(
+                  "https://translate.googleapis.com/translate_a/single?" + query,
+                  timeout=8,
+              ) as translation_response:
+                  translated = json.loads(translation_response.read().decode("utf-8"))
+              arabic_title = "".join(part[0] for part in translated[0] if part and part[0]).strip()
+              if not arabic_title:
+                  raise ValueError("Empty translation")
+          except Exception:
+              arabic_title = "تم تطبيق تحديث جديد على البوت."
           payload = {
-              "username": "سجل تحديثات البوت",
+              "username": "إشعارات البوت",
               "embeds": [{
                   "title": "تم نشر تحديث جديد للبوت",
-                  "description": f"**التغييرات:**\n{title}\n\nسيُعاد تشغيل البوت تلقائيًا لتطبيق التحديث.",
+                  "description": f"**ملخص التغييرات:**\n{arabic_title}\n\nسيُعاد تشغيل البوت تلقائيًا لتطبيق التحديث.",
                   "color": 5793266,
-                  "footer": {"text": "إشعار تلقائي من GitHub Actions"},
               }],
               "allowed_mentions": {"parse": []},
           }
