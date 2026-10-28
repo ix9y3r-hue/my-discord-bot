@@ -76,7 +76,7 @@ replacement = '''async def advance_after_track(
     if now_playing.get(guild.id) is finished_track:'''
 if needle in source:
     source = source.replace(needle, replacement, 1)
-elif "SoundCloud fallback failed for" not in source:
+elif "Keep YouTube requests on YouTube." not in source:
     raise SystemExit("ERROR: Could not find advance_after_track function in main.py")
 
 path.write_text(source, encoding="utf-8")
