@@ -79,20 +79,7 @@ class MusicBot(commands.Bot):
 
 bot = MusicBot(command_prefix=get_command_prefix, intents=intents)
 
-# Optional Railway variable: YOUTUBE_COOKIES containing Netscape-format cookie text.
-# Never log or print this value; cookies are sensitive authentication data.
-YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES")
-YOUTUBE_COOKIE_FILE = "/tmp/youtube_cookies.txt"
-if YOUTUBE_COOKIES:
-    try:
-        with open(YOUTUBE_COOKIE_FILE, "w", encoding="utf-8") as cookie_file:
-            cookie_file.write(YOUTUBE_COOKIES.strip() + "\n")
-    except OSError:
-        logger.exception("Could not prepare the optional YouTube cookie file")
-        YOUTUBE_COOKIES = None
-
 BASE_YTDL = {
-    **({"cookiefile": YOUTUBE_COOKIE_FILE} if YOUTUBE_COOKIES else {}),
     "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
@@ -530,7 +517,11 @@ async def extract_info(query: str, *, flat: bool = False) -> dict[str, Any] | No
                 timeout=EXTRACT_TIMEOUT,
             )
         except Exception as first_error:
-            if not is_youtube_query(query):
+            # Direct YouTube URLs go to SoundCloud immediately after extraction fails.
+            is_direct_youtube_url = (
+                query.startswith(("http://", "https://")) and is_youtube_query(query)
+            )
+            if not is_youtube_query(query) or is_direct_youtube_url:
                 raise
             logger.warning(
                 "Default YouTube extraction failed; trying alternate player clients: %s",
@@ -655,16 +646,18 @@ async def find_track(search: str) -> Track:
         webpage = data.get("webpage_url") or data.get("url")
         if not webpage:
             continue
-        return {"title": data.get("title") or "أغنية بدون اسم", "webpage": webpage}
+        track: Track = {"title": data.get("title") or "أغنية بدون اسم", "webpage": webpage}
+        if direct_youtube_url:
+            track["requested_direct_youtube"] = "true"
+        return track
 
-    # If a direct YouTube link cannot be extracted, use its public title to search
-    # YouTube first and SoundCloud second. Do not print or expose cookie values.
+    # If a direct YouTube link fails, use its public title and search SoundCloud first.
     if direct_youtube_url:
         title = await youtube_title_from_oembed(search)
         if title:
-            fallback = await find_named_fallback(title)
+            fallback = await find_named_fallback(title, prefer_soundcloud=True)
             if fallback:
-                logger.info("Direct YouTube URL failed; queued title-search fallback from %s", fallback.get("fallback_stage"))
+                logger.info("Direct YouTube URL failed; queued SoundCloud title fallback")
                 return fallback
 
     if last_error:
@@ -1148,7 +1141,7 @@ async def play_next(guild: discord.Guild) -> None:
                 error_text = str(playback_error).lower()
                 # Keep YouTube requests on YouTube. If an explicitly selected
                 # client fails during extraction, try the next supported client.
-                if is_youtube_query(track.get("webpage", "")):
+                if is_youtube_query(track.get("webpage", "")) and not track.get("requested_direct_youtube"):
                     selected_client = track.get("youtube_client")
                     if selected_client in YOUTUBE_FALLBACK_CLIENTS:
                         next_index = YOUTUBE_FALLBACK_CLIENTS.index(selected_client) + 1
@@ -1172,15 +1165,16 @@ async def play_next(guild: discord.Guild) -> None:
                         )
                         continue
 
-                # Once direct extraction and alternate YouTube clients fail, search
-                # by title on YouTube, then SoundCloud. A failed YouTube search
-                # result moves to SoundCloud instead of looping forever.
+                # Once a source fails, search SoundCloud directly for the title.
                 fallback_stage = track.get("fallback_stage")
                 if fallback_stage != "soundcloud":
                     try:
                         fallback = await find_named_fallback(
                             track.get("title", ""),
-                            prefer_soundcloud=(fallback_stage == "youtube"),
+                            prefer_soundcloud=(
+                                bool(track.get("requested_direct_youtube"))
+                                or fallback_stage == "youtube"
+                            ),
                         )
                     except Exception:
                         logger.exception("Title fallback search failed")
@@ -1198,9 +1192,9 @@ async def play_next(guild: discord.Guild) -> None:
                 if "sign in to confirm you're not a bot" in error_text or "confirm you're not a bot" in error_text:
                     reason = "يوتيوب طلب تحققًا من البوت، وجربت أكثر من طريقة لاستخراج الصوت لكنها لم تنجح."
                 elif "http error 403" in error_text or "status code 403" in error_text:
-                    reason = "يوتيوب رفض رابط البث (403)، حتى بعد استخراج رمز الوصول. قد يكون عنوان IP الخاص بالاستضافة مقيّدًا من يوتيوب."
+                    reason = "المصدر رفض رابط البث (403)، وقد يكون الرابط أو عنوان الاستضافة مقيّدًا."
                 elif "requested format is not available" in error_text or "requested format" in error_text:
-                    reason = "يوتيوب لم يوفّر صيغة صوت قابلة للتشغيل بهذه الطريقة. أجرب الطرق البديلة أولًا قبل اعتبار الرابط غير قابل للتشغيل."
+                    reason = "لم تتوفر صيغة صوت قابلة للتشغيل من هذا المصدر."
                 else:
                     reason = "فشل استخراج الصوت من الرابط."
                 await send_safely(
@@ -1217,12 +1211,12 @@ async def advance_after_track(
     requester_channel: discord.abc.Messageable,
     finished_ok: bool,
 ) -> None:
-    # YouTube sometimes returns a signed media URL that receives HTTP 403.
-    # Refresh the URL twice using mweb before trying the web_safari client.
+    # Skip YouTube retries for failed direct URLs and search SoundCloud immediately.
     if (
         not finished_ok
         and guild.id not in skipped_guilds
         and is_youtube_query(finished_track.get("webpage", ""))
+        and not finished_track.get("requested_direct_youtube")
     ):
         retry_count = int(finished_track.get("youtube_playback_retries", "0"))
         attempted_client = finished_track.get("youtube_client")
@@ -1250,15 +1244,17 @@ async def advance_after_track(
                 queues.setdefault(guild.id, []).insert(0, (retry_track, requester_channel))
                 logger.info("Trying alternate YouTube client for %s", finished_track.get("title", "unknown"))
             else:
-                # All direct-URL refreshes and YouTube clients failed. Search the
-                # title on YouTube first; if that result fails, try SoundCloud.
+                # All YouTube retries failed; use SoundCloud as the next source.
                 fallback_stage = finished_track.get("fallback_stage")
                 fallback = None
                 if fallback_stage != "soundcloud":
                     try:
                         fallback = await find_named_fallback(
                             finished_track.get("title", ""),
-                            prefer_soundcloud=(fallback_stage == "youtube"),
+                            prefer_soundcloud=(
+                                bool(finished_track.get("requested_direct_youtube"))
+                                or fallback_stage == "youtube"
+                            ),
                         )
                     except Exception:
                         logger.exception("Post-playback title fallback search failed")
@@ -1273,7 +1269,7 @@ async def advance_after_track(
                 else:
                     await send_safely(
                         requester_channel,
-                        "تعذر تشغيل الرابط، ولم أجد نتيجة قابلة للتجربة في يوتيوب أو ساوند كلاود. "
+                        "تعذر تشغيل الرابط، ولم أجد نتيجة قابلة للتجربة في ساوند كلاود. "
                         "سأنتقل للأغنية التالية.",
                     )
 
