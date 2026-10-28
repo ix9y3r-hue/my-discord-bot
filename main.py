@@ -1442,12 +1442,8 @@ async def before_voice_stats_watchdog() -> None:
 async def on_ready() -> None:
     global STARTUP_NOTIFICATION_SENT, GATEWAY_DISCONNECTED
     logger.info("تم تسجيل الدخول باسم %s", bot.user)
-    if not STARTUP_NOTIFICATION_SENT:
-        STARTUP_NOTIFICATION_SENT = True
-        GATEWAY_DISCONNECTED = False
-    elif GATEWAY_DISCONNECTED and not SHUTDOWN_REQUESTED:
-        GATEWAY_DISCONNECTED = False
-        await notify_all_guilds("عاد اتصال البوت إلى Discord بعد الانقطاع.")
+    STARTUP_NOTIFICATION_SENT = True
+    GATEWAY_DISCONNECTED = False
     if not getattr(bot, "_role_panel_view_registered", False):
         bot.add_view(RolePanelView())
         bot._role_panel_view_registered = True
@@ -1478,9 +1474,7 @@ async def on_disconnect() -> None:
     if SHUTDOWN_REQUESTED or GATEWAY_DISCONNECTED:
         return
     GATEWAY_DISCONNECTED = True
-    await notify_all_guilds(
-        "انقطع اتصال البوت بـ Discord مؤقتًا. يحاول الاتصال من جديد تلقائيًا."
-    )
+    logger.warning("انقطع اتصال البوت مؤقتًا؛ سيحاول الاتصال مجددًا تلقائيًا.")
 
 
 @bot.event
@@ -1488,7 +1482,7 @@ async def on_resumed() -> None:
     global GATEWAY_DISCONNECTED
     if GATEWAY_DISCONNECTED and not SHUTDOWN_REQUESTED:
         GATEWAY_DISCONNECTED = False
-        await notify_all_guilds("عاد اتصال البوت إلى Discord بعد الانقطاع.")
+        logger.info("عاد اتصال البوت إلى Discord بعد الانقطاع.")
 
 
 @bot.event
