@@ -395,6 +395,21 @@ async def extract_info(query: str, *, flat: bool = False) -> dict[str, Any] | No
             # clearest explanation of the initial failure (e.g. bot verification).
             raise first_error
 
+async def extract_youtube_info_with_client(
+    query: str, client: str
+) -> dict[str, Any] | None:
+    """Extract a fresh stream using one explicit alternate YouTube player client."""
+    try:
+        index = YOUTUBE_FALLBACK_CLIENTS.index(client)
+    except ValueError:
+        raise ValueError("Unsupported YouTube fallback client") from None
+    ydl = ytdl_stream_fallbacks[index]
+    async with ytdl_lock:
+        return await asyncio.wait_for(
+            asyncio.to_thread(ydl.extract_info, query, download=False),
+            timeout=EXTRACT_TIMEOUT,
+        )
+
 
 def build_queries(search: str) -> list[str]:
     if search.startswith(("http://", "https://")):
@@ -871,7 +886,13 @@ async def play_next(guild: discord.Guild) -> None:
         while queue:
             track, requester_channel = queue.pop(0)
             try:
-                stream = await extract_info(track["webpage"])
+                selected_client = track.get("youtube_client")
+                if selected_client and is_youtube_query(track.get("webpage", "")):
+                    stream = await extract_youtube_info_with_client(
+                        track["webpage"], selected_client
+                    )
+                else:
+                    stream = await extract_info(track["webpage"])
                 if not stream or not stream.get("url"):
                     raise ValueError("لم أتمكن من الحصول على رابط البث.")
                 source = build_ffmpeg_source(
@@ -986,40 +1007,54 @@ async def advance_after_track(
     requester_channel: discord.abc.Messageable,
     finished_ok: bool,
 ) -> None:
-    # If YouTube playback fails, try one SoundCloud copy before moving on.
-    if (
-        not finished_ok
-        and is_youtube_query(finished_track.get("webpage", ""))
-        and not finished_track.get("soundcloud_fallback_tried")
-    ):
-        try:
-            search_result = await extract_info(
-                f"scsearch1:{finished_track.get('title', '')}", flat=True
+    # A fresh URL from a different player client may avoid a YouTube CDN 403.
+    # Try each alternate client once, then use the existing SoundCloud fallback.
+    if not finished_ok and is_youtube_query(finished_track.get("webpage", "")):
+        attempted_client = finished_track.get("youtube_client")
+        if attempted_client in YOUTUBE_FALLBACK_CLIENTS:
+            next_index = YOUTUBE_FALLBACK_CLIENTS.index(attempted_client) + 1
+        else:
+            next_index = 0
+
+        if next_index < len(YOUTUBE_FALLBACK_CLIENTS):
+            retry_track: Track = {
+                **finished_track,
+                "youtube_client": YOUTUBE_FALLBACK_CLIENTS[next_index],
+            }
+            queues.setdefault(guild.id, []).insert(0, (retry_track, requester_channel))
+            await send_safely(
+                requester_channel,
+                f"تعذر تشغيل رابط يوتيوب بالطريقة الحالية؛ أجرب طريقة بديلة ({next_index + 1}/{len(YOUTUBE_FALLBACK_CLIENTS)}).",
             )
-            if search_result and search_result.get("entries") is not None:
-                search_result = next(
-                    (entry for entry in search_result["entries"] if entry), None
+        elif not finished_track.get("soundcloud_fallback_tried"):
+            try:
+                search_result = await extract_info(
+                    f"scsearch1:{finished_track.get('title', '')}", flat=True
                 )
-            if search_result:
-                fallback_url = search_result.get("webpage_url") or search_result.get("url")
-                if fallback_url and fallback_url.startswith("http"):
-                    fallback_track: Track = {
-                        "title": search_result.get("title") or finished_track.get("title", "أغنية"),
-                        "webpage": fallback_url,
-                        "requester": finished_track.get("requester", ""),
-                        "soundcloud_fallback_tried": "1",
-                    }
-                    queues.setdefault(guild.id, []).insert(0, (fallback_track, requester_channel))
-                    await send_safely(
-                        requester_channel,
-                        "يوتيوب رفض رابط الصوت؛ أجرب الآن نسخة بديلة من SoundCloud.",
+                if search_result and search_result.get("entries") is not None:
+                    search_result = next(
+                        (entry for entry in search_result["entries"] if entry), None
                     )
-        except Exception as fallback_error:
-            logger.warning(
-                "SoundCloud fallback failed for %s: %s",
-                finished_track.get("title", "unknown track"),
-                fallback_error,
-            )
+                if search_result:
+                    fallback_url = search_result.get("webpage_url") or search_result.get("url")
+                    if fallback_url and fallback_url.startswith("http"):
+                        fallback_track: Track = {
+                            "title": search_result.get("title") or finished_track.get("title", "أغنية"),
+                            "webpage": fallback_url,
+                            "requester": finished_track.get("requester", ""),
+                            "soundcloud_fallback_tried": "1",
+                        }
+                        queues.setdefault(guild.id, []).insert(0, (fallback_track, requester_channel))
+                        await send_safely(
+                            requester_channel,
+                            "تعذر تشغيل يوتيوب بعد تجربة الطرق البديلة؛ أجرب الآن نسخة من SoundCloud.",
+                        )
+            except Exception as fallback_error:
+                logger.warning(
+                    "SoundCloud fallback failed for %s: %s",
+                    finished_track.get("title", "unknown track"),
+                    fallback_error,
+                )
 
     if now_playing.get(guild.id) is finished_track:
         now_playing.pop(guild.id, None)
