@@ -95,22 +95,50 @@ class TemporaryVoice(commands.Cog):
             existing = self.config.get(guild.id, {})
             existing_id = existing.get("generator_channel_id")
             old_generator = guild.get_channel(existing_id) if existing_id else None
-            if isinstance(old_generator, discord.VoiceChannel):
-                await old_generator.delete(reason="إعادة إعداد الرومات الصوتية المؤقتة")
 
+            # Create and persist the replacement first. Never delete the working
+            # generator before the new one has been created and saved successfully.
             generator = await guild.create_voice_channel(
                 name="➕・ادخل لإنشاء روم",
                 category=category,
                 reason=f"إعداد الرومات المؤقتة بواسطة {interaction.user}",
             )
+            previous_config = self.config.get(guild.id)
             self.config[guild.id] = {
                 "generator_channel_id": generator.id,
                 "category_id": category.id if category else 0,
             }
-            _save_config(self.config)
+            try:
+                _save_config(self.config)
+            except OSError:
+                if previous_config is None:
+                    self.config.pop(guild.id, None)
+                else:
+                    self.config[guild.id] = previous_config
+                try:
+                    await generator.delete(reason="التراجع عن إعداد تعذر حفظه")
+                except discord.DiscordException:
+                    logger.exception("Could not clean up generator after config-save failure")
+                raise
+
+            if isinstance(old_generator, discord.VoiceChannel) and old_generator.id != generator.id:
+                try:
+                    await old_generator.delete(reason="استبدال روم إنشاء الرومات المؤقتة")
+                except discord.DiscordException:
+                    logger.warning(
+                        "New generator is active, but old generator %s could not be deleted",
+                        old_generator.id,
+                    )
         except discord.Forbidden:
             await interaction.response.send_message(
                 "ما عندي صلاحيات كافية لإنشاء القناة. أعطني **Manage Channels**.",
+                ephemeral=True,
+            )
+            return
+        except OSError:
+            logger.exception("Could not save temporary voice channel configuration")
+            await interaction.response.send_message(
+                "تعذر حفظ إعدادات الرومات. أبقيت الروم السابق دون حذف إن كان موجودًا.",
                 ephemeral=True,
             )
             return
