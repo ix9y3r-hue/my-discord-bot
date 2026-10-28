@@ -1000,7 +1000,8 @@ async def show_panel(
     track: Track,
     stream: dict[str, Any],
 ) -> None:
-    await clear_panel(guild.id)
+    # Reuse the existing player message instead of posting a new Now Playing card
+    # after each retry or fallback. This prevents duplicate panels in the text channel.
     volume = volumes.get(guild.id, DEFAULT_VOLUME)
     safe_title = track["title"].replace("[", "(").replace("]", ")")
     embed = discord.Embed(
@@ -1019,9 +1020,17 @@ async def show_panel(
         embed.add_field(name="🙋 الطالب", value=track["requester"], inline=True)
     embed.set_footer(text=f"🔊 مستوى الصوت: {round(volume * 100)}%")
     try:
-        panels[guild.id] = await channel.send(
-            embed=embed, view=PlayerView(guild.id, embed)
-        )
+        existing = panels.get(guild.id)
+        view = PlayerView(guild.id, embed)
+        if existing is not None:
+            try:
+                await existing.edit(content=None, embed=embed, view=view)
+                return
+            except discord.NotFound:
+                panels.pop(guild.id, None)
+            except discord.DiscordException:
+                logger.warning("Could not edit the existing player panel; creating a replacement")
+        panels[guild.id] = await channel.send(embed=embed, view=view)
     except discord.DiscordException:
         logger.exception("Could not send the player panel")
 
@@ -1200,10 +1209,7 @@ async def advance_after_track(
                 "youtube_playback_retries": str(retry_count + 1),
             }
             queues.setdefault(guild.id, []).insert(0, (retry_track, requester_channel))
-            await send_safely(
-                requester_channel,
-                f"يوتيوب رفض رابط الصوت؛ أجدد الرابط وأعيد المحاولة ({retry_count + 1}/2).",
-            )
+            logger.info("Refreshing failed YouTube stream for %s (attempt %s/2)", finished_track.get("title", "unknown"), retry_count + 1)
         else:
             if attempted_client in YOUTUBE_FALLBACK_CLIENTS:
                 next_index = YOUTUBE_FALLBACK_CLIENTS.index(attempted_client) + 1
@@ -1217,10 +1223,7 @@ async def advance_after_track(
                     "youtube_playback_retries": "2",
                 }
                 queues.setdefault(guild.id, []).insert(0, (retry_track, requester_channel))
-                await send_safely(
-                    requester_channel,
-                    "تعذر تشغيل رابط يوتيوب بعد تجديده؛ أجرب طريقة يوتيوب بديلة.",
-                )
+                logger.info("Trying alternate YouTube client for %s", finished_track.get("title", "unknown"))
             else:
                 # All direct-URL refreshes and YouTube clients failed. Search the
                 # title on YouTube first; if that result fails, try SoundCloud.
