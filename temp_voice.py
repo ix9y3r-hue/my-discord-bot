@@ -146,12 +146,10 @@ class TemporaryVoice(commands.Cog):
         embed = discord.Embed(
             title="لوحة التحكم بالرومات الصوتية المؤقتة",
             description=(
-                "ادخل رومك الصوتي المؤقت أولًا، ثم استخدم الأزرار التالية:\n"
-                "• تغيير اسم الروم\n"
-                "• قفل الروم أو فتحه\n"
-                "• تحديد عدد الأعضاء\n"
-                "• حذف الروم المؤقت\n\n"
-                "التحكم متاح لمالك الروم المؤقت فقط."
+                "ادخل رومك المؤقت أولًا، ثم اختر الإعداد المطلوب من الأزرار.\n"
+                "تقدر تغيّر الاسم والخصوصية والدردشة والمنطقة وجودة الصوت، "
+                "وتدير الأعضاء بالدعوة والوثوق والحظر والإخراج ونقل الملكية.\n\n"
+                "الأزرار لا تعمل إلا لمالك الروم المؤقت."
             ),
             color=discord.Color.blurple(),
         )
@@ -407,101 +405,165 @@ class KnockModal(discord.ui.Modal, title="طلب دخول الروم"):
 
 
 class TempVoicePanel(discord.ui.View):
-    """Small, reliable panel with only the requested supported controls."""
-
     def __init__(self) -> None:
         super().__init__(timeout=None)
 
+    async def modal(self, interaction: discord.Interaction, title: str, label: str, custom_id: str, default: str = "") -> None:
+        if await _room_or_reply(interaction) is None:
+            return
+        await interaction.response.send_modal(ArabicRoomModal(title, label, custom_id, default=default))
+
     @discord.ui.button(label="تغيير الاسم", emoji="✏️", style=discord.ButtonStyle.secondary, custom_id="tempvoice:rename", row=0)
     async def rename(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        channel = await _room_or_reply(interaction)
-        if channel is not None:
-            await interaction.response.send_modal(
-                ArabicRoomModal(
-                    "تغيير اسم الروم",
-                    "الاسم الجديد",
-                    "room_name",
-                    default=channel.name.removeprefix("🔊・"),
-                )
-            )
-
-    @discord.ui.button(label="قفل الروم", emoji="🔒", style=discord.ButtonStyle.secondary, custom_id="tempvoice:lock", row=0)
-    async def lock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        channel = await _room_or_reply(interaction)
-        if channel is None:
-            return
-        overwrite = channel.overwrites_for(channel.guild.default_role)
-        overwrite.connect = False
-        try:
-            await channel.set_permissions(
-                channel.guild.default_role,
-                overwrite=overwrite,
-                reason=f"قفل الروم بواسطة {interaction.user}",
-            )
-            await _reply(interaction, "تم قفل الروم.")
-        except discord.Forbidden:
-            await _reply(interaction, "البوت ما عنده صلاحية كافية لقفل الروم.")
-        except discord.HTTPException:
-            logger.exception("Could not lock temporary room %s", channel.id)
-            await _reply(interaction, "تعذر قفل الروم. حاول مرة ثانية.")
-
-    @discord.ui.button(label="فتح الروم", emoji="🔓", style=discord.ButtonStyle.secondary, custom_id="tempvoice:unlock", row=0)
-    async def unlock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        channel = await _room_or_reply(interaction)
-        if channel is None:
-            return
-        overwrite = channel.overwrites_for(channel.guild.default_role)
-        overwrite.connect = None
-        try:
-            await channel.set_permissions(
-                channel.guild.default_role,
-                overwrite=overwrite,
-                reason=f"فتح الروم بواسطة {interaction.user}",
-            )
-            await _reply(interaction, "تم فتح الروم.")
-        except discord.Forbidden:
-            await _reply(interaction, "البوت ما عنده صلاحية كافية لفتح الروم.")
-        except discord.HTTPException:
-            logger.exception("Could not unlock temporary room %s", channel.id)
-            await _reply(interaction, "تعذر فتح الروم. حاول مرة ثانية.")
+        c = await _room_or_reply(interaction)
+        if c: await interaction.response.send_modal(ArabicRoomModal("تغيير اسم الروم", "الاسم الجديد", "room_name", default=c.name.replace("🔊・", "")))
 
     @discord.ui.button(label="حد الأعضاء", emoji="👥", style=discord.ButtonStyle.secondary, custom_id="tempvoice:limit", row=0)
     async def limit(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        channel = await _room_or_reply(interaction)
-        if channel is not None:
-            await interaction.response.send_modal(
-                ArabicRoomModal(
-                    "حد الأعضاء",
-                    "عدد الأعضاء من 0 إلى 99",
-                    "room_limit",
-                    default=str(channel.user_limit),
-                    max_length=2,
-                )
-            )
+        c = await _room_or_reply(interaction)
+        if c: await interaction.response.send_modal(ArabicRoomModal("حد الأعضاء", "عدد الأعضاء من 0 إلى 99", "room_limit", default=str(c.user_limit)))
 
-    @discord.ui.button(label="حذف الروم", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="tempvoice:delete", row=1)
-    async def delete_room(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        channel = await _room_or_reply(interaction)
-        if channel is None:
-            return
-        await interaction.response.send_message("جارٍ حذف رومك المؤقت.", ephemeral=True)
-        cog = interaction.client.get_cog("TemporaryVoice")
-        if cog:
-            cog.temporary_channel_ids.discard(channel.id)
+    @discord.ui.button(label="الخصوصية", emoji="🙈", style=discord.ButtonStyle.secondary, custom_id="tempvoice:privacy", row=0)
+    async def privacy(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        c = await _room_or_reply(interaction)
+        if not c: return
+        ow = c.overwrites_for(c.guild.default_role)
+        private = ow.view_channel is False
+        ow.view_channel = None if private else False
+        ow.connect = False if not private else None
         try:
-            await channel.delete(reason=f"حذف الروم بواسطة {interaction.user}")
-        except discord.NotFound:
-            pass
-        except discord.Forbidden:
-            logger.warning("Missing permission to delete temporary room %s", channel.id)
-            if cog:
-                cog.temporary_channel_ids.add(channel.id)
-            await interaction.followup.send("البوت ما عنده صلاحية لحذف الروم.", ephemeral=True)
+            await c.set_permissions(c.guild.default_role, overwrite=ow)
+            await _reply(interaction, "تم جعل الروم عامًا." if private else "تم إخفاء الروم عن الأعضاء.")
+        except discord.HTTPException: await _reply(interaction, "تعذر تغيير الخصوصية.")
+
+    @discord.ui.button(label="دردشة الروم", emoji="💬", style=discord.ButtonStyle.secondary, custom_id="tempvoice:text", row=0)
+    async def text_chat(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        c = await _room_or_reply(interaction)
+        if not c: return
+        ow = c.overwrites_for(c.guild.default_role)
+        enabled = ow.send_messages is False
+        ow.send_messages = None if enabled else False
+        try:
+            await c.set_permissions(c.guild.default_role, overwrite=ow)
+            await _reply(interaction, "تم السماح بالدردشة." if enabled else "تم إيقاف الدردشة.")
+        except discord.HTTPException: await _reply(interaction, "تعذر تغيير صلاحية الدردشة.")
+
+    @discord.ui.button(label="المنطقة", emoji="🌐", style=discord.ButtonStyle.secondary, custom_id="tempvoice:region", row=0)
+    async def region(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        c = await _room_or_reply(interaction)
+        if not c: return
+        options = [discord.SelectOption(label="تلقائي", value="auto"), discord.SelectOption(label="البرازيل", value="brazil"), discord.SelectOption(label="هونغ كونغ", value="hongkong"), discord.SelectOption(label="الهند", value="india"), discord.SelectOption(label="اليابان", value="japan"), discord.SelectOption(label="سنغافورة", value="singapore"), discord.SelectOption(label="جنوب أفريقيا", value="southafrica"), discord.SelectOption(label="سيدني", value="sydney"), discord.SelectOption(label="أوروبا الغربية", value="rotterdam"), discord.SelectOption(label="الولايات المتحدة", value="us-central")]
+        view = RegionSelect(c.id, options)
+        await interaction.response.send_message("اختر منطقة الصوت:", view=view, ephemeral=True)
+
+    @discord.ui.button(label="جودة الصوت", emoji="📶", style=discord.ButtonStyle.secondary, custom_id="tempvoice:bitrate", row=1)
+    async def bitrate(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        c = await _room_or_reply(interaction)
+        if c: await interaction.response.send_modal(ArabicRoomModal("جودة الصوت", "معدل البت بالكيلوبت (8-384)", "room_bitrate", default=str(c.bitrate // 1000), max_length=3))
+
+    @discord.ui.button(label="قفل", emoji="🔒", style=discord.ButtonStyle.secondary, custom_id="tempvoice:lock", row=1)
+    async def lock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        c = await _room_or_reply(interaction)
+        if not c: return
+        ow = c.overwrites_for(c.guild.default_role)
+        locked = ow.connect is False
+        ow.connect = None if locked else False
+        try:
+            await c.set_permissions(c.guild.default_role, overwrite=ow)
+            await _reply(interaction, "تم فتح الروم." if locked else "تم قفل الروم.")
+        except discord.HTTPException: await _reply(interaction, "تعذر قفل الروم أو فتحه.")
+
+    @discord.ui.button(label="فتح", emoji="🔓", style=discord.ButtonStyle.secondary, custom_id="tempvoice:unlock", row=1)
+    async def unlock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        c = await _room_or_reply(interaction)
+        if not c: return
+        ow = c.overwrites_for(c.guild.default_role); ow.connect = None
+        try:
+            await c.set_permissions(c.guild.default_role, overwrite=ow); await _reply(interaction, "تم فتح الروم.")
+        except discord.HTTPException: await _reply(interaction, "تعذر فتح الروم.")
+
+    @discord.ui.button(label="وثوق", emoji="✅", style=discord.ButtonStyle.secondary, custom_id="tempvoice:trust", row=1)
+    async def trust(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.modal(interaction, "إضافة عضو موثوق", "آيدي العضو", "room_trust")
+
+    @discord.ui.button(label="إلغاء الوثوق", emoji="🚫", style=discord.ButtonStyle.secondary, custom_id="tempvoice:untrust", row=1)
+    async def untrust(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.modal(interaction, "إلغاء الوثوق", "آيدي العضو", "room_untrust")
+
+    @discord.ui.button(label="دعوة", emoji="➕", style=discord.ButtonStyle.secondary, custom_id="tempvoice:invite", row=2)
+    async def invite(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.modal(interaction, "دعوة عضو", "آيدي العضو", "room_invite")
+
+    @discord.ui.button(label="إلغاء الدعوة", emoji="➖", style=discord.ButtonStyle.secondary, custom_id="tempvoice:uninvite", row=2)
+    async def uninvite(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.modal(interaction, "إلغاء دعوة عضو", "آيدي العضو", "room_uninvite")
+
+    @discord.ui.button(label="طلب دخول", emoji="🔔", style=discord.ButtonStyle.secondary, custom_id="tempvoice:knock", row=2)
+    async def knock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(KnockModal())
+
+    @discord.ui.button(label="إخراج عضو", emoji="👋", style=discord.ButtonStyle.secondary, custom_id="tempvoice:kick", row=2)
+    async def kick(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.modal(interaction, "إخراج عضو", "آيدي العضو", "room_kick")
+
+    @discord.ui.button(label="حظر", emoji="⛔", style=discord.ButtonStyle.secondary, custom_id="tempvoice:block", row=2)
+    async def block(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.modal(interaction, "حظر عضو من الروم", "آيدي العضو", "room_block")
+
+    @discord.ui.button(label="رفع الحظر", emoji="☑️", style=discord.ButtonStyle.secondary, custom_id="tempvoice:unblock", row=3)
+    async def unblock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.modal(interaction, "رفع الحظر", "آيدي العضو", "room_unblock")
+
+    @discord.ui.button(label="استلام الملكية", emoji="👑", style=discord.ButtonStyle.secondary, custom_id="tempvoice:claim", row=3)
+    async def claim(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        member = interaction.user
+        c = member.voice.channel if isinstance(member, discord.Member) and member.voice else None
+        if not isinstance(c, discord.VoiceChannel) or c.id not in _all_temp_ids(interaction.client):
+            await _reply(interaction, "ادخل رومًا مؤقتًا أولًا.")
+            return
+        owner = _owner(c)
+        if owner and owner.id != member.id:
+            await _reply(interaction, "الروم له مالك بالفعل، ولا يمكن استلامه.")
+            return
+        ow = c.overwrites_for(member)
+        ow.view_channel = True; ow.connect = True; ow.manage_channels = True; ow.move_members = True
+        try:
+            await c.set_permissions(member, overwrite=ow)
+            await _reply(interaction, "أصبحت مالك الروم.")
         except discord.HTTPException:
-            logger.exception("Could not delete temporary room %s", channel.id)
-            if cog:
-                cog.temporary_channel_ids.add(channel.id)
-            await interaction.followup.send("تعذر حذف الروم. حاول مرة ثانية.", ephemeral=True)
+            await _reply(interaction, "تعذر استلام الملكية.")
+
+    @discord.ui.button(label="نقل الملكية", emoji="🔁", style=discord.ButtonStyle.secondary, custom_id="tempvoice:transfer", row=3)
+    async def transfer(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.modal(interaction, "نقل ملكية الروم", "آيدي العضو الجديد", "room_transfer")
+
+    @discord.ui.button(label="حذف الروم", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="tempvoice:delete", row=3)
+    async def delete_room(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        c = await _room_or_reply(interaction)
+        if not c: return
+        await interaction.response.send_message("جارٍ حذف رومك المؤقت.", ephemeral=True)
+        try:
+            cog = interaction.client.get_cog("TemporaryVoice")
+            if cog: cog.temporary_channel_ids.discard(c.id)
+            await c.delete(reason=f"حذف الروم بواسطة {interaction.user}")
+        except discord.HTTPException: logger.exception("Could not delete temporary room %s", c.id)
+
+    @discord.ui.button(label="إعادة ضبط", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="tempvoice:reset", row=3)
+    async def reset(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        c = await _room_or_reply(interaction)
+        if not c: return
+        owner = interaction.user
+        try:
+            for target in list(c.overwrites):
+                if isinstance(target, discord.Member) and target.id != owner.id:
+                    await c.set_permissions(target, overwrite=None)
+            ow = discord.PermissionOverwrite(view_channel=True, connect=True, manage_channels=True, move_members=True, mute_members=True, deafen_members=True)
+            await c.set_permissions(owner, overwrite=ow)
+            await c.set_permissions(c.guild.default_role, overwrite=discord.PermissionOverwrite(view_channel=True, connect=True, send_messages=None))
+            await c.edit(user_limit=0, bitrate=c.guild.bitrate_limit, rtc_region=None)
+            await _reply(interaction, "تمت إعادة ضبط إعدادات الروم.")
+        except (discord.HTTPException, AttributeError):
+            await _reply(interaction, "تعذر إعادة ضبط بعض الإعدادات. تحقق من صلاحيات البوت.")
 
 
 class RegionSelect(discord.ui.View):
