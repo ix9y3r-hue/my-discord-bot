@@ -90,18 +90,18 @@ BASE_YTDL = {
     "retries": 3,
     "extractor_retries": 3,
     "fragment_retries": 3,
-    # Prefer web_safari and allow yt-dlp to select any available audio format.
-    # This client may expose HLS formats that avoid the usual GoogleVideo 403 path.
-    "extractor_args": {"youtube": {"player_client": ["web_safari"]}},
+    # YouTube varies which player clients can return usable audio from hosted IPs.
+    # Try several clients; the BgUtils PO-token provider is installed in the Docker image.
+    "extractor_args": {"youtube": {"player_client": ["mweb", "tv", "web_safari"]}},
     # Let yt-dlp use Deno to solve YouTube JavaScript player challenges.
     "js_runtimes": {"deno": {}},
 }
 ytdl_search = yt_dlp.YoutubeDL({**BASE_YTDL, "extract_flat": "in_playlist"})
 ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
-# Try different official YouTube player clients if the default extraction fails.
-# They have different format availability, so trying them separately is more useful
-# than combining them into one extractor configuration.
-YOUTUBE_FALLBACK_CLIENTS = ("mweb",)
+# Try several official YouTube player clients if the primary extraction fails.
+# YouTube changes format and token requirements between clients; none is guaranteed
+# to work when the Railway egress IP is blocked, so SoundCloud remains the fallback.
+YOUTUBE_FALLBACK_CLIENTS = ("tv", "web_safari", "mweb")
 # Keep alternate extractors lazy: most requests succeed with the primary client,
 # so do not allocate extra YoutubeDL instances until a fallback is actually needed.
 ytdl_search_fallbacks: dict[str, yt_dlp.YoutubeDL] = {}
