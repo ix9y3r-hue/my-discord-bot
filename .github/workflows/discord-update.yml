@@ -1,4 +1,4 @@
-name: Manual Discord update notification (avoid duplicate push alerts)
+name: Manual Discord update notification
 
 on:
   workflow_dispatch:
@@ -10,53 +10,37 @@ jobs:
   announce:
     runs-on: ubuntu-latest
     steps:
-      - name: Build update announcement
-        uses: actions/github-script@v7
-        id: announcement
-        with:
-          script: |
-            const commits = context.payload.commits || [];
-            const messages = commits
-              .map(c => (c.message || "").split("\n")[0].trim())
-              .filter(Boolean)
-              .slice(0, 8);
-            const shortSha = context.sha.slice(0, 7);
-            const title = commits.length === 1
-              ? messages[0] || "تحديث جديد للبوت"
-              : `تم نشر تحديث جديد يضم ${commits.length} تغييرات`;
-            const details = messages.length
-              ? messages.map(m => `• ${m}`).join("\n").slice(0, 3500)
-              : "تم نشر تغييرات جديدة على النسخة الرئيسية من البوت.";
-            const payload = {
-              username: "سجل تحديثات البوت",
-              embeds: [{
-                title: "تحديث جديد للبوت",
-                description: `**${title}**\n\n${details}`,
-                color: 5793266,
-                fields: [{
-                  name: "الإصدار",
-                  value: `[${shortSha}](${context.payload.repository.html_url}/commit/${context.sha})`,
-                  inline: true
-                }, {
-                  name: "المستودع",
-                  value: context.payload.repository.full_name,
-                  inline: true
-                }],
-                timestamp: new Date().toISOString(),
-                footer: { text: "إشعار تلقائي عند نشر تحديث على main" }
-              }]
-            };
-            core.setOutput("payload", JSON.stringify(payload));
-      - name: Send announcement to Discord
+      - name: Send Arabic update announcement to Discord
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          ANNOUNCEMENT: ${{ steps.announcement.outputs.payload }}
         run: |
           if [ -z "$DISCORD_WEBHOOK_URL" ]; then
-            echo "::error::Missing repository secret DISCORD_WEBHOOK_URL. Add a Discord webhook URL in GitHub Actions secrets."
+            echo "::error::إعداد رابط إشعارات Discord غير موجود."
             exit 1
           fi
-          curl --fail-with-body --silent --show-error \
-            -H "Content-Type: application/json" \
-            -d "$ANNOUNCEMENT" \
-            "$DISCORD_WEBHOOK_URL"
+
+          python - <<'PY'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+
+          payload = {
+              "username": "إشعارات البوت",
+              "embeds": [{
+                  "title": "تم نشر تحديث جديد للبوت",
+                  "description": "سيُعاد تشغيل البوت تلقائيًا لتطبيق التحديث.",
+                  "color": 5793266
+              }],
+              "allowed_mentions": {"parse": []}
+          }
+          request = urllib.request.Request(
+              os.environ["DISCORD_WEBHOOK_URL"],
+              data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+              headers={"Content-Type": "application/json", "User-Agent": "GitHub-Actions-Update-Notifier"},
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=15) as response:
+              if response.status not in (200, 204):
+                  raise RuntimeError(f"Discord webhook returned HTTP {response.status}")
+          PY
