@@ -6,6 +6,8 @@ import os
 import shlex
 import shutil
 import socket
+import urllib.parse
+import urllib.request
 from threading import Thread
 from typing import Any
 
@@ -55,7 +57,20 @@ class MusicBot(commands.Bot):
 
 bot = MusicBot(command_prefix=get_command_prefix, intents=intents)
 
+# Optional Railway variable: YOUTUBE_COOKIES containing Netscape-format cookie text.
+# Never log or print this value; cookies are sensitive authentication data.
+YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES")
+YOUTUBE_COOKIE_FILE = "/tmp/youtube_cookies.txt"
+if YOUTUBE_COOKIES:
+    try:
+        with open(YOUTUBE_COOKIE_FILE, "w", encoding="utf-8") as cookie_file:
+            cookie_file.write(YOUTUBE_COOKIES.strip() + "\n")
+    except OSError:
+        logger.exception("Could not prepare the optional YouTube cookie file")
+        YOUTUBE_COOKIES = None
+
 BASE_YTDL = {
+    **({"cookiefile": YOUTUBE_COOKIE_FILE} if YOUTUBE_COOKIES else {}),
     "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
@@ -387,8 +402,31 @@ def build_queries(search: str) -> list[str]:
     return [f"scsearch1:{search}", f"ytsearch1:{search}"]
 
 
+async def youtube_title_from_oembed(url: str) -> str | None:
+    """Get a public YouTube title without asking yt-dlp to extract the blocked page."""
+    def request_title() -> str | None:
+        endpoint = "https://www.youtube.com/oembed?" + urllib.parse.urlencode(
+            {"url": url, "format": "json"}
+        )
+        request = urllib.request.Request(
+            endpoint,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; MusicBot/1.0)"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            title = payload.get("title")
+            return title.strip() if isinstance(title, str) and title.strip() else None
+        except Exception as exc:
+            logger.warning("Could not read YouTube public metadata: %s", exc)
+            return None
+    return await asyncio.to_thread(request_title)
+
+
 async def find_track(search: str) -> Track:
     last_error: Exception | None = None
+    direct_youtube_url = search.startswith(("http://", "https://")) and is_youtube_query(search)
+
     for query in build_queries(search):
         try:
             data = await extract_info(query, flat=True)
@@ -404,9 +442,39 @@ async def find_track(search: str) -> Track:
         if not webpage:
             continue
         return {"title": data.get("title") or "أغنية بدون اسم", "webpage": webpage}
+
+    # When YouTube blocks the server with its anti-bot check, a direct URL cannot
+    # be extracted by yt-dlp. Try its public oEmbed title, then find a playable
+    # SoundCloud copy rather than incorrectly telling the user the song doesn't exist.
+    if direct_youtube_url:
+        title = await youtube_title_from_oembed(search)
+        if title:
+            try:
+                fallback = await extract_info(f"scsearch1:{title}", flat=True)
+                if fallback and fallback.get("entries") is not None:
+                    fallback = next((entry for entry in fallback["entries"] if entry), None)
+                if fallback:
+                    fallback_url = fallback.get("webpage_url") or fallback.get("url")
+                    if fallback_url:
+                        logger.info("Using SoundCloud fallback for blocked YouTube URL: %s", title)
+                        return {
+                            "title": fallback.get("title") or title,
+                            "webpage": fallback_url,
+                            "requested_youtube_url": search,
+                        }
+            except Exception as exc:
+                logger.warning("SoundCloud fallback search failed for YouTube title %s: %s", title, exc)
+
     if last_error:
         logger.error("All searches failed", exc_info=last_error)
-    raise ValueError("ما لقيت الأغنية. جرّب اسمًا ثانيًا.")
+        error_text = str(last_error).lower()
+        if direct_youtube_url and ("sign in to confirm" in error_text or "not a bot" in error_text):
+            if not YOUTUBE_COOKIES:
+                raise ValueError(
+                    "يوتيوب يمنع التشغيل من سيرفر البوت حاليًا. لم أجد نسخة بديلة قابلة للتشغيل. "
+                    "يمكن تفعيل دعم يوتيوب بإضافة متغير YOUTUBE_COOKIES في Railway."
+                )
+    raise ValueError("ما لقيت الأغنية أو تعذر الوصول إليها. جرّب رابطًا آخر.")
 
 
 async def send_safely(channel: discord.abc.Messageable, message: str) -> None:
