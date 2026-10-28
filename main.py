@@ -191,13 +191,37 @@ voice_stats: dict[int, dict[str, Any]] = load_voice_stats()
 stats_active_channels: dict[int, set[int]] = {}
 
 
-def active_human_voice_channels(guild: discord.Guild) -> set[int]:
-    """Return voice/stage channels with at least one non-bot member."""
-    active: set[int] = set()
+def excluded_temporary_voice_channel_ids(guild: discord.Guild) -> set[int]:
+    """Return temporary voice rooms and their generator channel, which are excluded from stats."""
+    excluded: set[int] = set()
+    cog = bot.get_cog("TemporaryVoice")
+    if cog is not None:
+        excluded.update(getattr(cog, "temporary_channel_ids", set()))
+        settings = getattr(cog, "config", {}).get(guild.id, {})
+        generator_id = settings.get("generator_channel_id")
+        if generator_id:
+            excluded.add(int(generator_id))
+
+    # Also recognize temporary rooms by their stable name prefix, including during
+    # the short period before the extension rebuilds its registry after a restart.
     for channel in guild.channels:
         if isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
-            if any(not member.bot for member in channel.members):
-                active.add(channel.id)
+            if channel.name.startswith("🔊・"):
+                excluded.add(channel.id)
+    return excluded
+
+
+def active_human_voice_channels(guild: discord.Guild) -> set[int]:
+    """Return active non-bot voice/stage channels, excluding temporary rooms."""
+    excluded = excluded_temporary_voice_channel_ids(guild)
+    active: set[int] = set()
+    for channel in guild.channels:
+        if (
+            isinstance(channel, (discord.VoiceChannel, discord.StageChannel))
+            and channel.id not in excluded
+            and any(not member.bot for member in channel.members)
+        ):
+            active.add(channel.id)
     return active
 
 
@@ -214,10 +238,17 @@ async def publish_weekly_stats(guild: discord.Guild, record: dict[str, Any]) -> 
         logger.warning("Weekly voice stats channel is missing for guild %s", guild.id)
         return
 
-    totals = {str(k): float(v) for k, v in record.get("seconds", {}).items()}
+    excluded_channel_ids = excluded_temporary_voice_channel_ids(guild)
+    # Ignore any old activity accumulated for temporary rooms before this fix.
+    totals = {
+        str(k): float(v)
+        for k, v in record.get("seconds", {}).items()
+        if int(k) not in excluded_channel_ids
+    }
     channel_ids = {
         channel.id for channel in guild.channels
         if isinstance(channel, (discord.VoiceChannel, discord.StageChannel))
+        and channel.id not in excluded_channel_ids
     } | {int(k) for k in totals}
     ranked = sorted(
         ((voice_channel_id, totals.get(str(voice_channel_id), 0.0)) for voice_channel_id in channel_ids),
@@ -237,7 +268,7 @@ async def publish_weekly_stats(guild: discord.Guild, record: dict[str, Any]) -> 
             f"**⏱️ مدة النشاط: {format_activity(seconds)}**"
         )
 
-    # إجمالي نشاط كل الرومات، وليس أفضل ثلاثة فقط.
+    # إجمالي نشاط الرومات الداخلة في الترتيب فقط، باستثناء الرومات المؤقتة.
     total_seconds = sum(totals.values())
     description = "\n\n━━━━━━━━━━━━━━━━━━━━\n\n".join(lines) if lines else "## لا توجد رومات صوتية مسجلة."
 
@@ -255,7 +286,9 @@ async def publish_weekly_stats(guild: discord.Guild, record: dict[str, Any]) -> 
         value=f"# {format_activity(total_seconds)}",
         inline=False,
     )
-    embed.set_footer(text="تحديث الترتيب كل 10 دقائق • تصفير الإحصائيات كل 7 أيام")
+    embed.set_footer(
+        text="تحديث الترتيب كل 10 دقائق • تصفير الإحصائيات كل 7 أيام • الرومات المؤقتة وقناة إنشائها غير مشمولة"
+    )
 
     new_message_ids: list[int] = []
     try:
