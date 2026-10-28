@@ -115,21 +115,27 @@ ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
 # They have different format availability, so trying them separately is more useful
 # than combining them into one extractor configuration.
 YOUTUBE_FALLBACK_CLIENTS = ("mweb",)
-ytdl_search_fallbacks = [
-    yt_dlp.YoutubeDL({
-        **BASE_YTDL,
-        "extract_flat": "in_playlist",
-        "extractor_args": {"youtube": {"player_client": [client]}},
-    })
-    for client in YOUTUBE_FALLBACK_CLIENTS
-]
-ytdl_stream_fallbacks = [
-    yt_dlp.YoutubeDL({
-        **BASE_YTDL,
-        "extractor_args": {"youtube": {"player_client": [client]}},
-    })
-    for client in YOUTUBE_FALLBACK_CLIENTS
-]
+# Keep alternate extractors lazy: most requests succeed with the primary client,
+# so do not allocate extra YoutubeDL instances until a fallback is actually needed.
+ytdl_search_fallbacks: dict[str, yt_dlp.YoutubeDL] = {}
+ytdl_stream_fallbacks: dict[str, yt_dlp.YoutubeDL] = {}
+
+
+def get_fallback_ytdl(client: str, *, flat: bool = False) -> yt_dlp.YoutubeDL:
+    cache = ytdl_search_fallbacks if flat else ytdl_stream_fallbacks
+    if client not in YOUTUBE_FALLBACK_CLIENTS:
+        raise ValueError("Unsupported YouTube fallback client")
+    if client not in cache:
+        options = {
+            **BASE_YTDL,
+            "extractor_args": {"youtube": {"player_client": [client]}},
+        }
+        if flat:
+            options["extract_flat"] = "in_playlist"
+        cache[client] = yt_dlp.YoutubeDL(options)
+    return cache[client]
+
+
 ytdl_lock = asyncio.Lock()
 
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
@@ -517,7 +523,6 @@ def is_youtube_query(query: str) -> bool:
 
 async def extract_info(query: str, *, flat: bool = False) -> dict[str, Any] | None:
     default_ydl = ytdl_search if flat else ytdl_stream
-    fallback_clients = ytdl_search_fallbacks if flat else ytdl_stream_fallbacks
     async with ytdl_lock:
         try:
             return await asyncio.wait_for(
@@ -532,8 +537,9 @@ async def extract_info(query: str, *, flat: bool = False) -> dict[str, Any] | No
                 first_error,
             )
             last_error: Exception = first_error
-            for client, fallback_ydl in zip(YOUTUBE_FALLBACK_CLIENTS, fallback_clients):
+            for client in YOUTUBE_FALLBACK_CLIENTS:
                 try:
+                    fallback_ydl = get_fallback_ytdl(client, flat=flat)
                     result = await asyncio.wait_for(
                         asyncio.to_thread(
                             fallback_ydl.extract_info, query, download=False
@@ -557,11 +563,7 @@ async def extract_youtube_info_with_client(
     query: str, client: str
 ) -> dict[str, Any] | None:
     """Extract a fresh stream using one explicit alternate YouTube player client."""
-    try:
-        index = YOUTUBE_FALLBACK_CLIENTS.index(client)
-    except ValueError:
-        raise ValueError("Unsupported YouTube fallback client") from None
-    ydl = ytdl_stream_fallbacks[index]
+    ydl = get_fallback_ytdl(client, flat=False)
     async with ytdl_lock:
         return await asyncio.wait_for(
             asyncio.to_thread(ydl.extract_info, query, download=False),
