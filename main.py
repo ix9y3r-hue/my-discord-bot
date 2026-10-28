@@ -1000,8 +1000,16 @@ async def show_panel(
     track: Track,
     stream: dict[str, Any],
 ) -> None:
-    # Reuse the existing player message instead of posting a new Now Playing card
-    # after each retry or fallback. This prevents duplicate panels in the text channel.
+    # Keep the active player panel at the bottom of the text channel:
+    # remove the previous panel, then post exactly one fresh panel for this track.
+    old_panel = panels.pop(guild.id, None)
+    if old_panel is not None:
+        try:
+            await old_panel.delete()
+        except discord.NotFound:
+            pass
+        except discord.DiscordException:
+            logger.warning("Could not delete the previous player panel")
     volume = volumes.get(guild.id, DEFAULT_VOLUME)
     safe_title = track["title"].replace("[", "(").replace("]", ")")
     embed = discord.Embed(
@@ -1020,17 +1028,10 @@ async def show_panel(
         embed.add_field(name="🙋 الطالب", value=track["requester"], inline=True)
     embed.set_footer(text=f"🔊 مستوى الصوت: {round(volume * 100)}%")
     try:
-        existing = panels.get(guild.id)
-        view = PlayerView(guild.id, embed)
-        if existing is not None:
-            try:
-                await existing.edit(content=None, embed=embed, view=view)
-                return
-            except discord.NotFound:
-                panels.pop(guild.id, None)
-            except discord.DiscordException:
-                logger.warning("Could not edit the existing player panel; creating a replacement")
-        panels[guild.id] = await channel.send(embed=embed, view=view)
+        panels[guild.id] = await channel.send(
+            embed=embed,
+            view=PlayerView(guild.id, embed),
+        )
     except discord.DiscordException:
         logger.exception("Could not send the player panel")
 
