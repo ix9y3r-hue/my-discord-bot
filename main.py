@@ -81,6 +81,9 @@ BASE_YTDL = {
     "retries": 3,
     "extractor_retries": 3,
     "fragment_retries": 3,
+    # Prefer Safari web client: yt-dlp documents that its HLS formats currently avoid
+    # the GVS PO Token requirement that causes 403 on some cloud hosts.
+    "extractor_args": {"youtube": {"player_client": ["web_safari"]}},
     # Let yt-dlp use Deno to solve YouTube JavaScript player challenges.
     "js_runtimes": {"deno": {}},
 }
