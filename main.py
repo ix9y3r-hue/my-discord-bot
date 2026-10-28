@@ -1224,7 +1224,7 @@ async def connect_voice(
     lock = voice_connection_locks.setdefault(guild.id, asyncio.Lock())
     entered_or_moved = False
     async with lock:
-        previous_target = voice_targets.get(guild.id)
+        # Persist the requested room before connecting so transient failures can retry.
         set_target(guild.id, channel.id)
         try:
             voice_client = guild.voice_client
@@ -1238,7 +1238,10 @@ async def connect_voice(
                 voice_client = await channel.connect(timeout=25.0, reconnect=True)
                 entered_or_moved = True
         except Exception:
-            set_target(guild.id, previous_target)
+            logger.warning(
+                "Voice connection to channel %s failed; keeping the saved target for retry.",
+                channel.id,
+            )
             raise
     if entered_or_moved:
         start_join_sound(guild, voice_client)
