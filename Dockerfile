@@ -29,4 +29,6 @@ COPY main.py temp_voice.py patch_main.py ./
 RUN python patch_main.py && python -m py_compile main.py temp_voice.py
 
 EXPOSE 8080
-CMD ["python", "main.py"]
+# Start the PO Token provider on loopback only, then start the Discord bot.
+# yt-dlp's BgUtils plugin connects to http://127.0.0.1:4416.
+CMD ["sh", "-c", "cd /root/bgutil-ytdlp-pot-provider/server/node_modules && deno run --allow-env --allow-net --allow-ffi=. --allow-read=. ../src/main.ts --host 127.0.0.1 & exec python /app/main.py"]
