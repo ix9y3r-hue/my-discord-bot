@@ -66,6 +66,8 @@ BASE_YTDL = {
     "retries": 3,
     "extractor_retries": 3,
     "fragment_retries": 3,
+    # Let yt-dlp use Deno to solve YouTube JavaScript player challenges.
+    "js_runtimes": {"deno": {}},
 }
 ytdl_search = yt_dlp.YoutubeDL({**BASE_YTDL, "extract_flat": "in_playlist"})
 ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
@@ -742,7 +744,7 @@ async def play_next(guild: discord.Guild) -> None:
         queue = queues.setdefault(guild.id, [])
         if not queue:
             now_playing.pop(guild.id, None)
-            await clear_panel(guild.id)
+            # Keep the last player panel and its controls visible while idle.
             return
         while queue:
             track, requester_channel = queue.pop(0)
@@ -809,6 +811,41 @@ async def advance_after_track(
     requester_channel: discord.abc.Messageable,
     finished_ok: bool,
 ) -> None:
+    # If YouTube playback fails, try one SoundCloud copy before moving on.
+    if (
+        not finished_ok
+        and is_youtube_query(finished_track.get("webpage", ""))
+        and not finished_track.get("soundcloud_fallback_tried")
+    ):
+        try:
+            search_result = await extract_info(
+                f"scsearch1:{finished_track.get('title', '')}", flat=True
+            )
+            if search_result and search_result.get("entries") is not None:
+                search_result = next(
+                    (entry for entry in search_result["entries"] if entry), None
+                )
+            if search_result:
+                fallback_url = search_result.get("webpage_url") or search_result.get("url")
+                if fallback_url and fallback_url.startswith("http"):
+                    fallback_track: Track = {
+                        "title": search_result.get("title") or finished_track.get("title", "أغنية"),
+                        "webpage": fallback_url,
+                        "requester": finished_track.get("requester", ""),
+                        "soundcloud_fallback_tried": "1",
+                    }
+                    queues.setdefault(guild.id, []).insert(0, (fallback_track, requester_channel))
+                    await send_safely(
+                        requester_channel,
+                        "يوتيوب رفض رابط الصوت؛ أجرب الآن نسخة بديلة من SoundCloud.",
+                    )
+        except Exception as fallback_error:
+            logger.warning(
+                "SoundCloud fallback failed for %s: %s",
+                finished_track.get("title", "unknown track"),
+                fallback_error,
+            )
+
     if now_playing.get(guild.id) is finished_track:
         now_playing.pop(guild.id, None)
     skipped = guild.id in skipped_guilds
