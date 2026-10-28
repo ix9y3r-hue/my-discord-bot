@@ -493,8 +493,15 @@ class TrackedFFmpegPCMAudio(discord.FFmpegPCMAudio):
 
     def cleanup(self) -> None:
         process = getattr(self, "_process", None)
-        if process is not None:
-            self.exit_code = process.poll()
+        # FFmpeg cleanup can be called repeatedly; after the first call
+        # discord.py may replace the process with a sentinel lacking poll().
+        if hasattr(process, "poll"):
+            try:
+                code = process.poll()
+                if code is not None:
+                    self.exit_code = code
+            except (OSError, ValueError, AttributeError):
+                pass
         super().cleanup()
 
 
