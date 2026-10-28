@@ -1,0 +1,66 @@
+name: Discord Update Notifications
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send update announcement to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          COMMIT_TITLE: ${{ github.event.head_commit.message || 'تحديث يدوي للمشروع' }}
+          COMMIT_URL: ${{ github.event.head_commit.url || github.server_url }}
+          COMMIT_AUTHOR: ${{ github.event.head_commit.author.name || github.actor }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "::error::Missing DISCORD_WEBHOOK_URL repository secret."
+            exit 1
+          fi
+
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          title = os.environ.get("COMMIT_TITLE", "تحديث جديد")
+          # Discord embed field limits: keep commit titles safely bounded.
+          title = title[:240]
+          url = os.environ.get("COMMIT_URL", "")
+          author = os.environ.get("COMMIT_AUTHOR", "مطور البوت")[:100]
+          repo = os.environ.get("REPOSITORY", "")
+          payload = {
+              "username": "سجل تحديثات البوت",
+              "embeds": [{
+                  "title": "تم نشر تحديث جديد للبوت",
+                  "description": f"**التغييرات:**\n{title}",
+                  "color": 5793266,
+                  "fields": [
+                      {"name": "المستودع", "value": repo[:1000], "inline": True},
+                      {"name": "بواسطة", "value": author, "inline": True},
+                  ],
+                  "url": url or None,
+                  "footer": {"text": "إشعار تلقائي من GitHub Actions"},
+              }],
+              "allowed_mentions": {"parse": []},
+          }
+          data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+          request = urllib.request.Request(
+              os.environ["DISCORD_WEBHOOK_URL"],
+              data=data,
+              headers={"Content-Type": "application/json", "User-Agent": "GitHub-Actions-Update-Notifier"},
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=15) as response:
+              if response.status not in (200, 204):
+                  raise RuntimeError(f"Discord webhook returned HTTP {response.status}")
+              print("Discord update announcement sent.")
+          PY
