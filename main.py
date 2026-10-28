@@ -484,6 +484,20 @@ async def send_safely(channel: discord.abc.Messageable, message: str) -> None:
         logger.exception("Could not send a message to the request channel")
 
 
+class TrackedFFmpegPCMAudio(discord.FFmpegPCMAudio):
+    """Keep FFmpeg's exit code available after discord.py cleans up the process."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.exit_code: int | None = None
+        super().__init__(*args, **kwargs)
+
+    def cleanup(self) -> None:
+        process = getattr(self, "_process", None)
+        if process is not None:
+            self.exit_code = process.poll()
+        super().cleanup()
+
+
 def build_ffmpeg_source(
     stream: dict[str, Any], volume: float
 ) -> discord.PCMVolumeTransformer:
@@ -492,7 +506,7 @@ def build_ffmpeg_source(
     if headers:
         header_str = "".join(f"{k}: {v}\r\n" for k, v in headers.items())
         before += f" -headers {shlex.quote(header_str)}"
-    source = discord.FFmpegPCMAudio(
+    source = TrackedFFmpegPCMAudio(
         stream["url"], before_options=before, options=FFMPEG_OPTIONS_AFTER
     )
     return discord.PCMVolumeTransformer(source, volume=volume)
@@ -867,8 +881,11 @@ async def play_next(guild: discord.Guild) -> None:
                     # FFmpeg can exit with HTTP 403 while discord.py reports no
                     # decoder exception. Check its process return code as well so
                     # the existing SoundCloud fallback actually runs.
-                    process = getattr(getattr(_source, "original", None), "_process", None)
-                    return_code = getattr(process, "returncode", None)
+                    original_source = getattr(_source, "original", None)
+                    process = getattr(original_source, "_process", None)
+                    return_code = getattr(original_source, "exit_code", None)
+                    if return_code is None and process is not None:
+                        return_code = process.poll()
                     playback_ok = error is None and return_code in (None, 0)
                     if error:
                         logger.error("Playback error: %s", error)
@@ -905,6 +922,43 @@ async def play_next(guild: discord.Guild) -> None:
                 if now_playing.get(guild.id) is track:
                     now_playing.pop(guild.id, None)
                 error_text = str(playback_error).lower()
+                # If YouTube extraction or FFmpeg setup fails before playback starts,
+                # queue a SoundCloud alternative instead of ending the queue and
+                # removing the player panel.
+                if (
+                    is_youtube_query(track.get("webpage", ""))
+                    and not track.get("soundcloud_fallback_tried")
+                ):
+                    try:
+                        fallback_data = await extract_info(
+                            f"scsearch1:{track.get('title', '')}", flat=True
+                        )
+                        if fallback_data and fallback_data.get("entries") is not None:
+                            fallback_data = next(
+                                (entry for entry in fallback_data["entries"] if entry), None
+                            )
+                        if fallback_data:
+                            fallback_url = fallback_data.get("webpage_url") or fallback_data.get("url")
+                            if fallback_url and fallback_url.startswith("http"):
+                                queues.setdefault(guild.id, []).insert(
+                                    0,
+                                    ({
+                                        "title": fallback_data.get("title") or track.get("title", "أغنية"),
+                                        "webpage": fallback_url,
+                                        "requester": track.get("requester", ""),
+                                        "soundcloud_fallback_tried": "1",
+                                    }, requester_channel),
+                                )
+                                await send_safely(
+                                    requester_channel,
+                                    "تعذر تشغيل رابط يوتيوب؛ أجرب الآن نسخة بديلة من SoundCloud.",
+                                )
+                                continue
+                    except Exception as fallback_error:
+                        logger.warning(
+                            "Pre-play SoundCloud fallback failed for %s: %s",
+                            track.get("title", "unknown track"), fallback_error,
+                        )
                 if "sign in to confirm you're not a bot" in error_text or "confirm you're not a bot" in error_text:
                     reason = "يوتيوب طلب تحققًا من البوت، وجربت أكثر من طريقة لاستخراج الصوت لكنها لم تنجح."
                 elif "http error 403" in error_text or "status code 403" in error_text:
