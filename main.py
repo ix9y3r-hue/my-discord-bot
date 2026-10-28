@@ -71,7 +71,7 @@ if YOUTUBE_COOKIES:
 
 BASE_YTDL = {
     **({"cookiefile": YOUTUBE_COOKIE_FILE} if YOUTUBE_COOKIES else {}),
-    "format": "bestaudio[protocol=m3u8_native]/bestaudio/best",
+    "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
@@ -81,9 +81,9 @@ BASE_YTDL = {
     "retries": 3,
     "extractor_retries": 3,
     "fragment_retries": 3,
-    # Use mweb with the BgUtils PO Token provider installed in the container.
-    # web_safari remains a fallback because its HLS formats may avoid GVS PO Tokens.
-    "extractor_args": {"youtube": {"player_client": ["mweb"]}},
+    # Prefer web_safari and allow yt-dlp to select any available audio format.
+    # This client may expose HLS formats that avoid the usual GoogleVideo 403 path.
+    "extractor_args": {"youtube": {"player_client": ["web_safari"]}},
     # Let yt-dlp use Deno to solve YouTube JavaScript player challenges.
     "js_runtimes": {"deno": {}},
 }
@@ -92,7 +92,7 @@ ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
 # Try different official YouTube player clients if the default extraction fails.
 # They have different format availability, so trying them separately is more useful
 # than combining them into one extractor configuration.
-YOUTUBE_FALLBACK_CLIENTS = ("mweb", "web_safari")
+YOUTUBE_FALLBACK_CLIENTS = ("mweb",)
 ytdl_search_fallbacks = [
     yt_dlp.YoutubeDL({
         **BASE_YTDL,
@@ -378,10 +378,6 @@ async def extract_info(query: str, *, flat: bool = False) -> dict[str, Any] | No
             )
             last_error: Exception = first_error
             for client, fallback_ydl in zip(YOUTUBE_FALLBACK_CLIENTS, fallback_clients):
-                # The primary mweb client was already tried above; do not retry it here.
-                if client == "mweb":
-                    continue
-                try:
                     result = await asyncio.wait_for(
                         asyncio.to_thread(
                             fallback_ydl.extract_info, query, download=False
@@ -969,7 +965,9 @@ async def play_next(guild: discord.Guild) -> None:
                 if "sign in to confirm you're not a bot" in error_text or "confirm you're not a bot" in error_text:
                     reason = "يوتيوب طلب تحققًا من البوت، وجربت أكثر من طريقة لاستخراج الصوت لكنها لم تنجح."
                 elif "http error 403" in error_text or "status code 403" in error_text:
-                    reason = "يوتيوب رفض الوصول إلى رابط البث. قد يكون التقييد من يوتيوب أو من عنوان استضافة البوت."
+                    reason = "يوتيوب رفض رابط البث (403)، حتى بعد استخراج رمز الوصول. قد يكون عنوان IP الخاص بالاستضافة مقيّدًا من يوتيوب."
+                elif "requested format is not available" in error_text or "requested format" in error_text:
+                    reason = "يوتيوب لم يوفّر صيغة صوت قابلة للتشغيل بهذه الطريقة. أجرب الطرق البديلة أولًا قبل اعتبار الرابط غير قابل للتشغيل."
                 else:
                     reason = "فشل استخراج الصوت من الرابط."
                 await send_safely(
