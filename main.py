@@ -1746,6 +1746,86 @@ async def setup_notifications(
     )
 
 
+@bot.tree.command(
+    name="اعلان_تحديث",
+    description="إرسال إعلان منسق عن إضافة أو تحديث جديد في روم الإشعارات",
+)
+@discord.app_commands.guild_only()
+@discord.app_commands.default_permissions(manage_guild=True)
+@discord.app_commands.describe(
+    العنوان="عنوان مختصر للتحديث",
+    التفاصيل="اشرح الإضافة أو الإصلاح الذي تم فعليًا",
+)
+async def announce_bot_update(
+    interaction: discord.Interaction,
+    العنوان: discord.app_commands.Range[str, 3, 100],
+    التفاصيل: discord.app_commands.Range[str, 5, 1500],
+) -> None:
+    """Send an explicitly authored changelog entry without polling or background work."""
+    guild = interaction.guild
+    member = interaction.user
+    if guild is None or not isinstance(member, discord.Member):
+        await interaction.response.send_message(
+            "هذا الأمر يعمل داخل السيرفر فقط.", ephemeral=True
+        )
+        return
+    if not (
+        member.guild_permissions.manage_guild
+        or member.guild_permissions.administrator
+    ):
+        await interaction.response.send_message(
+            "تحتاج صلاحية إدارة السيرفر لنشر تحديث.", ephemeral=True
+        )
+        return
+
+    channel_id = notification_channels.get(guild.id)
+    target = guild.get_channel(channel_id) if channel_id else None
+    if not isinstance(target, discord.TextChannel) and channel_id:
+        try:
+            fetched = await bot.fetch_channel(channel_id)
+            target = fetched if isinstance(fetched, discord.TextChannel) else None
+        except discord.DiscordException:
+            target = None
+    if not isinstance(target, discord.TextChannel):
+        await interaction.response.send_message(
+            "حدد روم الإشعارات أولًا باستخدام الأمر /اشعارات.", ephemeral=True
+        )
+        return
+
+    bot_member = guild.me
+    permissions = target.permissions_for(bot_member) if bot_member else None
+    if not permissions or not permissions.view_channel or not permissions.send_messages:
+        await interaction.response.send_message(
+            "أحتاج صلاحية مشاهدة روم الإشعارات وإرسال الرسائل فيه.", ephemeral=True
+        )
+        return
+
+    embed = discord.Embed(
+        title=f"تحديث جديد | {العنوان.strip()}",
+        description=التفاصيل.strip(),
+        color=0x5865F2,
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.set_author(name="سجل تحديثات البوت")
+    embed.set_footer(text="إعلان تحديث رسمي")
+    try:
+        await target.send(
+            content="**وصل تحديث جديد للبوت**",
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except discord.DiscordException:
+        logger.exception("Could not publish update announcement in guild %s", guild.id)
+        await interaction.response.send_message(
+            "تعذر نشر الإعلان. تحقق من صلاحيات البوت في روم الإشعارات.", ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"تم نشر إعلان التحديث في {target.mention}.", ephemeral=True
+    )
+
+
 @bot.tree.command(name="setup_role", description="إعداد لوحة إنشاء الرتب في هذه القناة")
 @discord.app_commands.guild_only()
 @discord.app_commands.default_permissions(manage_guild=True)
