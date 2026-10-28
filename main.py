@@ -1009,7 +1009,11 @@ async def advance_after_track(
 ) -> None:
     # A fresh URL from a different player client may avoid a YouTube CDN 403.
     # Try each alternate client once, then use the existing SoundCloud fallback.
-    if not finished_ok and is_youtube_query(finished_track.get("webpage", "")):
+    if (
+        not finished_ok
+        and guild.id not in skipped_guilds
+        and is_youtube_query(finished_track.get("webpage", ""))
+    ):
         attempted_client = finished_track.get("youtube_client")
         if attempted_client in YOUTUBE_FALLBACK_CLIENTS:
             next_index = YOUTUBE_FALLBACK_CLIENTS.index(attempted_client) + 1
