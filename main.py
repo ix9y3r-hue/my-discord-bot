@@ -92,7 +92,7 @@ ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
 # Try different official YouTube player clients if the default extraction fails.
 # They have different format availability, so trying them separately is more useful
 # than combining them into one extractor configuration.
-YOUTUBE_FALLBACK_CLIENTS = ("web_safari",)
+YOUTUBE_FALLBACK_CLIENTS = ("mweb", "web_safari")
 ytdl_search_fallbacks = [
     yt_dlp.YoutubeDL({
         **BASE_YTDL,
@@ -378,6 +378,9 @@ async def extract_info(query: str, *, flat: bool = False) -> dict[str, Any] | No
             )
             last_error: Exception = first_error
             for client, fallback_ydl in zip(YOUTUBE_FALLBACK_CLIENTS, fallback_clients):
+                # The primary mweb client was already tried above; do not retry it here.
+                if client == "mweb":
+                    continue
                 try:
                     result = await asyncio.wait_for(
                         asyncio.to_thread(
