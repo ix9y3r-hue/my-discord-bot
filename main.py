@@ -1758,8 +1758,8 @@ async def setup_notifications(
 )
 async def announce_bot_update(
     interaction: discord.Interaction,
-    العنوان: discord.app_commands.Range[str, 3, 100],
-    التفاصيل: discord.app_commands.Range[str, 5, 1500],
+    العنوان: str,
+    التفاصيل: str,
 ) -> None:
     """Send an explicitly authored changelog entry without polling or background work."""
     guild = interaction.guild
@@ -1775,6 +1775,15 @@ async def announce_bot_update(
     ):
         await interaction.response.send_message(
             "تحتاج صلاحية إدارة السيرفر لنشر تحديث.", ephemeral=True
+        )
+        return
+
+    title = العنوان.strip()
+    details = التفاصيل.strip()
+    if not 3 <= len(title) <= 100 or not 5 <= len(details) <= 1500:
+        await interaction.response.send_message(
+            "خلّ العنوان بين 3 و100 حرف، والتفاصيل بين 5 و1500 حرف.",
+            ephemeral=True,
         )
         return
 
@@ -1801,8 +1810,8 @@ async def announce_bot_update(
         return
 
     embed = discord.Embed(
-        title=f"تحديث جديد | {العنوان.strip()}",
-        description=التفاصيل.strip(),
+        title=f"تحديث جديد | {title}",
+        description=details,
         color=0x5865F2,
         timestamp=discord.utils.utcnow(),
     )
