@@ -5,6 +5,7 @@ import logging
 import os
 import shlex
 import shutil
+import signal
 import socket
 import urllib.parse
 import urllib.request
@@ -18,7 +19,8 @@ from flask import Flask
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIX = "!"
-STATS_FILE = os.getenv("VOICE_STATS_FILE", "voice_stats.json")
+DATA_DIR = os.getenv("BOT_DATA_DIR", "/data" if os.path.isdir("/data") else ".")
+STATS_FILE = os.getenv("VOICE_STATS_FILE", os.path.join(DATA_DIR, "voice_stats.json"))
 STATS_WEEK_SECONDS = 7 * 24 * 60 * 60
 STATS_UPDATE_SECONDS = 10 * 60
 MAX_QUEUE = 50
@@ -49,8 +51,28 @@ intents.message_content = True
 intents.voice_states = True
 
 
+ACTIVE_LOOP: asyncio.AbstractEventLoop | None = None
+SHUTDOWN_REQUESTED = False
+STARTUP_NOTIFICATION_SENT = False
+GATEWAY_DISCONNECTED = False
+
+
 class MusicBot(commands.Bot):
     async def setup_hook(self) -> None:
+        global ACTIVE_LOOP
+        ACTIVE_LOOP = asyncio.get_running_loop()
+        # Persist temporary-room settings alongside the other bot state on Railway.
+        os.environ.setdefault(
+            "TEMP_VOICE_CONFIG_FILE",
+            os.path.join(DATA_DIR, "temp_voice_config.json"),
+        )
+        # Railway sends SIGTERM for ordinary service restarts/deployments. Try to
+        # notify the configured Discord channel before shutting down cleanly.
+        if hasattr(signal, "SIGTERM"):
+            try:
+                signal.signal(signal.SIGTERM, handle_shutdown_signal)
+            except (OSError, ValueError):
+                logger.exception("Could not register graceful shutdown handler")
         # Load the temporary voice-room feature before connecting to Discord.
         await self.load_extension("temp_voice")
 
@@ -130,8 +152,12 @@ MAX_VOLUME = 1.5
 VOLUME_STEP = 0.1
 voice_locks: dict[int, asyncio.Lock] = {}
 voice_connection_locks: dict[int, asyncio.Lock] = {}
-STATE_FILE = os.getenv("STATE_FILE", "voice_state.json")
-ROLE_OWNERS_FILE = os.getenv("ROLE_OWNERS_FILE", "created_roles.json")
+STATE_FILE = os.getenv("STATE_FILE", os.path.join(DATA_DIR, "voice_state.json"))
+ROLE_OWNERS_FILE = os.getenv("ROLE_OWNERS_FILE", os.path.join(DATA_DIR, "created_roles.json"))
+NOTIFICATION_CHANNELS_FILE = os.getenv(
+    "NOTIFICATION_CHANNELS_FILE",
+    os.path.join(DATA_DIR, "notification_channels.json"),
+)
 
 
 def load_targets() -> dict[int, int]:
@@ -143,6 +169,107 @@ def load_targets() -> dict[int, int]:
 
 
 voice_targets: dict[int, int] = load_targets()
+
+
+def load_notification_channels() -> dict[int, int]:
+    try:
+        with open(NOTIFICATION_CHANNELS_FILE, encoding="utf-8") as file:
+            raw = json.load(file)
+        return {int(guild_id): int(channel_id) for guild_id, channel_id in raw.items()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+
+
+def save_notification_channels() -> bool:
+    try:
+        parent = os.path.dirname(NOTIFICATION_CHANNELS_FILE)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        temporary_path = f"{NOTIFICATION_CHANNELS_FILE}.tmp"
+        with open(temporary_path, "w", encoding="utf-8") as file:
+            json.dump(
+                {str(guild_id): channel_id for guild_id, channel_id in notification_channels.items()},
+                file,
+                ensure_ascii=False,
+                indent=2,
+            )
+        os.replace(temporary_path, NOTIFICATION_CHANNELS_FILE)
+        return True
+    except OSError:
+        logger.exception("Could not save notification channel settings")
+        return False
+
+
+notification_channels: dict[int, int] = load_notification_channels()
+
+
+async def send_guild_notification(guild: discord.Guild, message: str) -> bool:
+    channel_id = notification_channels.get(guild.id)
+    if not channel_id:
+        return False
+    channel = guild.get_channel(channel_id)
+    if not isinstance(channel, discord.TextChannel):
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except discord.DiscordException:
+            logger.warning(
+                "Notification channel %s is unavailable in guild %s",
+                channel_id,
+                guild.id,
+            )
+            return False
+    if not isinstance(channel, discord.TextChannel):
+        logger.warning("Notification channel %s is not a text channel", channel_id)
+        return False
+    try:
+        await channel.send(message, allowed_mentions=discord.AllowedMentions.none())
+        return True
+    except discord.DiscordException:
+        logger.exception(
+            "Could not send a bot-status notification to channel %s", channel_id
+        )
+        return False
+
+
+async def notify_all_guilds(message: str) -> None:
+    for guild in list(bot.guilds):
+        try:
+            await send_guild_notification(guild, message)
+        except Exception:
+            logger.exception("Unexpected notification failure for guild %s", guild.id)
+
+
+async def graceful_shutdown(signum: int) -> None:
+    logger.warning("Received signal %s; sending shutdown notifications", signum)
+    try:
+        await asyncio.wait_for(
+            notify_all_guilds(
+                "سيتم إيقاف البوت مؤقتًا بسبب إعادة تشغيل أو تحديث من الاستضافة. "
+                "سيحاول Railway تشغيله تلقائيًا، وستصلك إشعار عودته عند اتصاله."
+            ),
+            timeout=4.0,
+        )
+    except Exception:
+        logger.exception("Could not complete shutdown notifications in time")
+    try:
+        await bot.close()
+    except Exception:
+        logger.exception("Error while closing the bot gracefully")
+
+
+def handle_shutdown_signal(signum: int, _frame: Any) -> None:
+    global SHUTDOWN_REQUESTED
+    if SHUTDOWN_REQUESTED:
+        return
+    SHUTDOWN_REQUESTED = True
+    loop = ACTIVE_LOOP
+    if loop is not None and not loop.is_closed():
+        try:
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(graceful_shutdown(signum))
+            )
+        except RuntimeError:
+            logger.exception("Could not schedule graceful shutdown")
 
 
 def load_created_roles() -> dict[int, dict[int, int]]:
@@ -1128,8 +1255,13 @@ async def reconnect_to_voice(guild_id: int, channel_id: int) -> None:
         guild = bot.get_guild(guild_id)
         channel = guild.get_channel(channel_id) if guild else None
         if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
-            set_target(guild_id, None)
-            return
+            logger.warning(
+                "Saved voice channel %s is unavailable in guild %s; keeping the target "
+                "and retrying. Use !اخرج to clear it intentionally.",
+                channel_id,
+                guild_id,
+            )
+            continue
         try:
             voice_client = guild.voice_client
             if (
@@ -1226,7 +1358,18 @@ async def before_voice_stats_watchdog() -> None:
 
 @bot.event
 async def on_ready() -> None:
+    global STARTUP_NOTIFICATION_SENT, GATEWAY_DISCONNECTED
     logger.info("تم تسجيل الدخول باسم %s", bot.user)
+    if not STARTUP_NOTIFICATION_SENT:
+        STARTUP_NOTIFICATION_SENT = True
+        GATEWAY_DISCONNECTED = False
+        await notify_all_guilds(
+            "تم تشغيل البوت أو إعادة تشغيله، وهو متصل الآن. "
+            "إذا كان قد توقف أو أعادت الاستضافة تشغيله، فقد عاد للعمل."
+        )
+    elif GATEWAY_DISCONNECTED and not SHUTDOWN_REQUESTED:
+        GATEWAY_DISCONNECTED = False
+        await notify_all_guilds("عاد اتصال البوت إلى Discord بعد الانقطاع.")
     if not getattr(bot, "_role_panel_view_registered", False):
         bot.add_view(RolePanelView())
         bot._role_panel_view_registered = True
@@ -1249,6 +1392,25 @@ async def on_ready() -> None:
     save_voice_stats()
     if not voice_stats_watchdog.is_running():
         voice_stats_watchdog.start()
+
+
+@bot.event
+async def on_disconnect() -> None:
+    global GATEWAY_DISCONNECTED
+    if SHUTDOWN_REQUESTED or GATEWAY_DISCONNECTED:
+        return
+    GATEWAY_DISCONNECTED = True
+    await notify_all_guilds(
+        "انقطع اتصال البوت بـ Discord مؤقتًا. يحاول الاتصال من جديد تلقائيًا."
+    )
+
+
+@bot.event
+async def on_resumed() -> None:
+    global GATEWAY_DISCONNECTED
+    if GATEWAY_DISCONNECTED and not SHUTDOWN_REQUESTED:
+        GATEWAY_DISCONNECTED = False
+        await notify_all_guilds("عاد اتصال البوت إلى Discord بعد الانقطاع.")
 
 
 @bot.event
@@ -1421,6 +1583,77 @@ class RolePanelView(discord.ui.View):
         await interaction.response.send_modal(RoleCreateModal())
 
 
+@bot.tree.command(
+    name="اشعارات",
+    description="تحديد روم إشعارات تشغيل البوت وانقطاع الاتصال",
+)
+@discord.app_commands.guild_only()
+@discord.app_commands.default_permissions(manage_guild=True)
+@discord.app_commands.describe(
+    channel="اختر روم الإشعارات، أو اتركه فارغًا لاستخدام الروم الذي كتبت فيه الأمر"
+)
+async def setup_notifications(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel | None = None,
+) -> None:
+    guild = interaction.guild
+    member = interaction.user
+    if guild is None or not isinstance(member, discord.Member):
+        await interaction.response.send_message(
+            "هذا الأمر يعمل داخل السيرفر فقط.", ephemeral=True
+        )
+        return
+    if not (
+        member.guild_permissions.manage_guild
+        or member.guild_permissions.administrator
+    ):
+        await interaction.response.send_message(
+            "تحتاج صلاحية إدارة السيرفر لاستخدام هذا الأمر.", ephemeral=True
+        )
+        return
+    target = channel or interaction.channel
+    if not isinstance(target, discord.TextChannel):
+        await interaction.response.send_message(
+            "اختر رومًا كتابيًا داخل السيرفر.", ephemeral=True
+        )
+        return
+    bot_member = guild.me
+    if bot_member is None:
+        await interaction.response.send_message(
+            "تعذر التحقق من صلاحيات البوت داخل السيرفر.", ephemeral=True
+        )
+        return
+    permissions = target.permissions_for(bot_member)
+    if not permissions.view_channel or not permissions.send_messages:
+        await interaction.response.send_message(
+            "أحتاج صلاحية مشاهدة الروم وإرسال الرسائل فيه.", ephemeral=True
+        )
+        return
+
+    old_channel_id = notification_channels.get(guild.id)
+    notification_channels[guild.id] = target.id
+    if not save_notification_channels():
+        if old_channel_id is None:
+            notification_channels.pop(guild.id, None)
+        else:
+            notification_channels[guild.id] = old_channel_id
+        await interaction.response.send_message(
+            "لم أستطع حفظ الإعدادات الدائمة. تحقق من تخزين البوت ثم حاول مرة ثانية.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(
+        f"تم تحديد {target.mention} كروم لإشعارات تشغيل البوت وانقطاعه وعودته. "
+        "الإعداد محفوظ حتى بعد إعادة تشغيل الاستضافة.",
+        ephemeral=True,
+    )
+    await send_guild_notification(
+        guild,
+        "تم تفعيل هذا الروم لإشعارات حالة البوت. ستصلك رسالة عند تشغيله أو انقطاعه أو عودة الاتصال.",
+    )
+
+
 @bot.tree.command(name="setup_role", description="إعداد لوحة إنشاء الرتب في هذه القناة")
 @discord.app_commands.guild_only()
 @discord.app_commands.default_permissions(manage_guild=True)
@@ -1590,6 +1823,20 @@ async def join_voice(ctx: commands.Context) -> None:
         await ctx.send("ادخل رومًا صوتيًا أولًا ثم اكتب `!ادخل`.")
         return
     channel = ctx.author.voice.channel
+    locked_channel_id = voice_targets.get(ctx.guild.id)
+    current_voice = ctx.guild.voice_client
+    if locked_channel_id is None and current_voice and current_voice.is_connected():
+        locked_channel_id = current_voice.channel.id
+    if locked_channel_id is not None and locked_channel_id != channel.id:
+        locked_channel = ctx.guild.get_channel(locked_channel_id)
+        locked_name = locked_channel.name if isinstance(
+            locked_channel, (discord.VoiceChannel, discord.StageChannel)
+        ) else "الروم الصوتي المحفوظ"
+        await ctx.send(
+            f"أنا مثبت في **{locked_name}** ولن أغيّر الروم تلقائيًا. "
+            "إذا تبي تغييره، اكتب !اخرج ثم !ادخل من الروم الجديد."
+        )
+        return
     permissions = channel.permissions_for(ctx.guild.me)
     if not permissions.view_channel or not permissions.connect:
         await ctx.send(
@@ -1625,6 +1872,20 @@ async def play_song(ctx: commands.Context, *, search: str | None = None) -> None
         await ctx.send(f"الطابور ممتلئ (الحد الأقصى {MAX_QUEUE} أغنية).")
         return
     channel = ctx.author.voice.channel
+    locked_channel_id = voice_targets.get(ctx.guild.id)
+    current_voice = ctx.guild.voice_client
+    if locked_channel_id is None and current_voice and current_voice.is_connected():
+        locked_channel_id = current_voice.channel.id
+    if locked_channel_id is not None and locked_channel_id != channel.id:
+        locked_channel = ctx.guild.get_channel(locked_channel_id)
+        locked_name = locked_channel.name if isinstance(
+            locked_channel, (discord.VoiceChannel, discord.StageChannel)
+        ) else "الروم الصوتي المحفوظ"
+        await ctx.send(
+            f"البوت مثبت في **{locked_name}** ولن ينتقل تلقائيًا. "
+            "إذا تبي تغييره، اكتب !اخرج أولًا ثم اطلب الأغنية من الروم الجديد."
+        )
+        return
     try:
         voice_client = await connect_voice(ctx.guild, channel)
     except Exception:
