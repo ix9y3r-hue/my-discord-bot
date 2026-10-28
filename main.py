@@ -308,6 +308,14 @@ def load_voice_stats() -> dict[int, dict[str, Any]]:
                 "last_report": float(value.get("last_report", value.get("period_start", time.time()))),
                 "message_ids": [int(mid) for mid in value.get("message_ids", []) if str(mid).isdigit()],
                 "seconds": {str(k): max(0.0, float(v)) for k, v in value.get("seconds", {}).items()},
+                "member_seconds": {
+                    str(channel_id): {
+                        str(member_id): max(0.0, float(member_seconds))
+                        for member_id, member_seconds in members.items()
+                    }
+                    for channel_id, members in value.get("member_seconds", {}).items()
+                    if isinstance(members, dict)
+                },
             }
         return result
     except (OSError, ValueError, TypeError, KeyError):
@@ -400,13 +408,37 @@ async def publish_weekly_stats(guild: discord.Guild, record: dict[str, Any]) -> 
     medals = {1: "🎖️", 2: "🥈", 3: "🥉"}
     rank_names = {1: "المركز الأول", 2: "المركز الثاني", 3: "المركز الثالث"}
     lines: list[str] = []
+    member_seconds = record.setdefault("member_seconds", {})
     for rank, (voice_channel_id, seconds) in enumerate(ranked, 1):
         voice_channel = guild.get_channel(voice_channel_id)
         name = voice_channel.name if voice_channel else f"روم محذوف ({voice_channel_id})"
+        channel_members = member_seconds.get(str(voice_channel_id), {})
+        top_member = None
+        if isinstance(channel_members, dict) and channel_members:
+            ranked_members = sorted(
+                (
+                    (int(member_id), float(member_time))
+                    for member_id, member_time in channel_members.items()
+                    if str(member_id).isdigit()
+                ),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            for member_id, member_time in ranked_members:
+                candidate = guild.get_member(member_id)
+                if candidate is not None and not candidate.bot:
+                    top_member = (candidate, member_time)
+                    break
+        member_line = (
+            f"**👤 أكثر عضو متفاعل: {top_member[0].display_name}**\n"
+            f"**⏳ مدة وجوده في الروم: {format_activity(top_member[1])}**"
+            if top_member else "**👤 أكثر عضو متفاعل: لا توجد بيانات بعد**"
+        )
         lines.append(
             f"## {medals[rank]} {rank_names[rank]}\n"
             f"# 🔊 {name}\n"
-            f"**⏱️ مدة النشاط: {format_activity(seconds)}**"
+            f"**⏱️ مدة نشاط الروم: {format_activity(seconds)}**\n"
+            f"{member_line}"
         )
 
     # إجمالي نشاط الرومات الداخلة في الترتيب فقط، باستثناء الرومات المؤقتة.
@@ -1414,10 +1446,28 @@ async def voice_stats_watchdog() -> None:
             key = str(voice_channel_id)
             seconds[key] = float(seconds.get(key, 0.0)) + elapsed
 
+        # Track time per human member in each eligible voice room, excluding temp rooms.
+        member_seconds = record.setdefault("member_seconds", {})
+        excluded_ids = excluded_temporary_voice_channel_ids(guild)
+        for voice_channel in guild.channels:
+            if (
+                not isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel))
+                or voice_channel.id in excluded_ids
+            ):
+                continue
+            channel_key = str(voice_channel.id)
+            channel_totals = member_seconds.setdefault(channel_key, {})
+            for voice_member in voice_channel.members:
+                if voice_member.bot:
+                    continue
+                member_key = str(voice_member.id)
+                channel_totals[member_key] = float(channel_totals.get(member_key, 0.0)) + elapsed
+
         if now >= deadline:
             # Publish the completed week's ranking, then start a clean 7-day period.
             await publish_weekly_stats(guild, record)
             record["seconds"] = {}
+            record["member_seconds"] = {}
             record["period_start"] = now
             record["last_tick"] = now
             record["last_report"] = now
