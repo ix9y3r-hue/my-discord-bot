@@ -80,4 +80,4 @@ elif "Keep YouTube requests on YouTube." not in source:
     raise SystemExit("ERROR: Could not find advance_after_track function in main.py")
 
 path.write_text(source, encoding="utf-8")
-print("Patched main.py: Deno enabled, player controls stay visible, and SoundCloud fallback added.")
+print("Patched main.py: Deno enabled and player controls stay visible; YouTube fallback clients are configured in main.py.")
