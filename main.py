@@ -1190,11 +1190,20 @@ async def play_next(guild: discord.Guild) -> None:
                     if fallback:
                         fallback["requester"] = track.get("requester", "")
                         queues.setdefault(guild.id, []).insert(0, (fallback, requester_channel))
-                        await send_safely(
-                            requester_channel,
-                            f"تعذر تشغيل الرابط؛ أجرب الآن **{fallback['title']}** من "
-                            f"{'يوتيوب' if fallback.get('fallback_stage') == 'youtube' else 'ساوند كلاود'}.",
-                        )
+                        if (
+                            fallback.get("fallback_stage") == "soundcloud"
+                            and is_youtube_query(track.get("webpage", ""))
+                        ):
+                            await send_safely(
+                                requester_channel,
+                                "ما حصلت الأغنية في يوتيوب، بدور عليها في ساوند كلاود...",
+                            )
+                        else:
+                            await send_safely(
+                                requester_channel,
+                                f"تعذر تشغيل الرابط؛ أجرب الآن **{fallback['title']}** من "
+                                f"{'يوتيوب' if fallback.get('fallback_stage') == 'youtube' else 'ساوند كلاود'}.",
+                            )
                         continue
 
                 if "sign in to confirm you're not a bot" in error_text or "confirm you're not a bot" in error_text:
@@ -1271,11 +1280,20 @@ async def advance_after_track(
                 if fallback:
                     fallback["requester"] = finished_track.get("requester", "")
                     queues.setdefault(guild.id, []).insert(0, (fallback, requester_channel))
-                    await send_safely(
-                        requester_channel,
-                        f"تعذر تشغيل الرابط؛ أجرب **{fallback['title']}** من "
-                        f"{'يوتيوب' if fallback.get('fallback_stage') == 'youtube' else 'ساوند كلاود'}.",
-                    )
+                    if (
+                        fallback.get("fallback_stage") == "soundcloud"
+                        and is_youtube_query(finished_track.get("webpage", ""))
+                    ):
+                        await send_safely(
+                            requester_channel,
+                            "ما حصلت الأغنية في يوتيوب، بدور عليها في ساوند كلاود...",
+                        )
+                    else:
+                        await send_safely(
+                            requester_channel,
+                            f"تعذر تشغيل الرابط؛ أجرب **{fallback['title']}** من "
+                            f"{'يوتيوب' if fallback.get('fallback_stage') == 'youtube' else 'ساوند كلاود'}.",
+                        )
                 else:
                     await send_safely(
                         requester_channel,
