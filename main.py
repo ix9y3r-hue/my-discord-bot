@@ -862,11 +862,24 @@ async def play_next(guild: discord.Guild) -> None:
                     error: Exception | None,
                     _track: Track = track,
                     _channel: discord.abc.Messageable = requester_channel,
+                    _source: discord.PCMVolumeTransformer = source,
                 ) -> None:
+                    # FFmpeg can exit with HTTP 403 while discord.py reports no
+                    # decoder exception. Check its process return code as well so
+                    # the existing SoundCloud fallback actually runs.
+                    process = getattr(getattr(_source, "original", None), "_process", None)
+                    return_code = getattr(process, "returncode", None)
+                    playback_ok = error is None and return_code in (None, 0)
                     if error:
                         logger.error("Playback error: %s", error)
+                    if return_code not in (None, 0):
+                        logger.warning(
+                            "FFmpeg exited unsuccessfully for %s (return code %s)",
+                            _track.get("title", "unknown track"),
+                            return_code,
+                        )
                     future = asyncio.run_coroutine_threadsafe(
-                        advance_after_track(guild, _track, _channel, error is None),
+                        advance_after_track(guild, _track, _channel, playback_ok),
                         bot.loop,
                     )
 
