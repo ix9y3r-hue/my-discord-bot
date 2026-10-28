@@ -574,6 +574,45 @@ async def youtube_title_from_oembed(url: str) -> str | None:
     return await asyncio.to_thread(request_title)
 
 
+
+async def find_named_fallback(title: str, *, prefer_soundcloud: bool = False) -> Track | None:
+    """Search by title on YouTube first, then SoundCloud; never log cookie contents."""
+    title = title.strip()
+    if not title:
+        return None
+
+    sources = [("soundcloud", f"scsearch3:{title}")] if prefer_soundcloud else [
+        ("youtube", f"ytsearch3:{title}"),
+        ("soundcloud", f"scsearch3:{title}"),
+    ]
+    for source_name, query in sources:
+        try:
+            data = await extract_info(query, flat=True)
+        except Exception as exc:
+            logger.warning("%s title search failed: %s", source_name, exc)
+            continue
+
+        entries = data.get("entries") if isinstance(data, dict) else None
+        candidates = entries if entries is not None else ([data] if data else [])
+        for entry in candidates:
+            if not isinstance(entry, dict):
+                continue
+            webpage = entry.get("webpage_url") or entry.get("original_url") or entry.get("url")
+            video_id = entry.get("id")
+            if source_name == "youtube" and isinstance(video_id, str) and video_id and (
+                not isinstance(webpage, str) or not webpage.startswith(("http://", "https://"))
+            ):
+                webpage = f"https://www.youtube.com/watch?v={video_id}"
+            if not isinstance(webpage, str) or not webpage.startswith(("http://", "https://")):
+                continue
+            return {
+                "title": str(entry.get("title") or title),
+                "webpage": webpage,
+                "fallback_stage": source_name,
+            }
+    return None
+
+
 async def find_track(search: str) -> Track:
     last_error: Exception | None = None
     direct_youtube_url = search.startswith(("http://", "https://")) and is_youtube_query(search)
@@ -594,22 +633,19 @@ async def find_track(search: str) -> Track:
             continue
         return {"title": data.get("title") or "أغنية بدون اسم", "webpage": webpage}
 
-    # A direct YouTube URL must remain a YouTube source. Do not silently
-    # replace the user's requested video with an unrelated SoundCloud result.
+    # If a direct YouTube link cannot be extracted, use its public title to search
+    # YouTube first and SoundCloud second. Do not print or expose cookie values.
+    if direct_youtube_url:
+        title = await youtube_title_from_oembed(search)
+        if title:
+            fallback = await find_named_fallback(title)
+            if fallback:
+                logger.info("Direct YouTube URL failed; queued title-search fallback from %s", fallback.get("fallback_stage"))
+                return fallback
 
     if last_error:
         logger.error("All searches failed", exc_info=last_error)
-        error_text = str(last_error).lower()
-        if direct_youtube_url and any(marker in error_text for marker in (
-            "sign in to confirm", "not a bot", "page needs to be reloaded",
-            "http error 403", "status code 403", "requested format is not available",
-        )):
-            raise ValueError(
-                "تعذر استخراج صوت رابط يوتيوب من استضافة البوت بعد تجربة طرق التشغيل المتاحة. "
-                "لم أستبدل الرابط بمصدر آخر. قد يكون السبب تقييدًا من يوتيوب أو الحاجة إلى "
-                "تحديث طريقة الاستخراج."
-            )
-    raise ValueError("ما لقيت الأغنية أو تعذر الوصول إليها. جرّب رابطًا آخر.")
+    raise ValueError("ما قدرت أشغل الرابط أو ألقى الأغنية في يوتيوب أو ساوند كلاود. جرّب اسمًا أوضح أو رابطًا آخر.")
 
 
 async def send_safely(channel: discord.abc.Messageable, message: str) -> None:
@@ -1101,6 +1137,30 @@ async def play_next(guild: discord.Guild) -> None:
                             f"({next_index + 1}/{len(YOUTUBE_FALLBACK_CLIENTS)}).",
                         )
                         continue
+
+                # Once direct extraction and alternate YouTube clients fail, search
+                # by title on YouTube, then SoundCloud. A failed YouTube search
+                # result moves to SoundCloud instead of looping forever.
+                fallback_stage = track.get("fallback_stage")
+                if fallback_stage != "soundcloud":
+                    try:
+                        fallback = await find_named_fallback(
+                            track.get("title", ""),
+                            prefer_soundcloud=(fallback_stage == "youtube"),
+                        )
+                    except Exception:
+                        logger.exception("Title fallback search failed")
+                        fallback = None
+                    if fallback:
+                        fallback["requester"] = track.get("requester", "")
+                        queues.setdefault(guild.id, []).insert(0, (fallback, requester_channel))
+                        await send_safely(
+                            requester_channel,
+                            f"تعذر تشغيل الرابط؛ أجرب الآن **{fallback['title']}** من "
+                            f"{'يوتيوب' if fallback.get('fallback_stage') == 'youtube' else 'ساوند كلاود'}.",
+                        )
+                        continue
+
                 if "sign in to confirm you're not a bot" in error_text or "confirm you're not a bot" in error_text:
                     reason = "يوتيوب طلب تحققًا من البوت، وجربت أكثر من طريقة لاستخراج الصوت لكنها لم تنجح."
                 elif "http error 403" in error_text or "status code 403" in error_text:
@@ -1162,11 +1222,32 @@ async def advance_after_track(
                     "تعذر تشغيل رابط يوتيوب بعد تجديده؛ أجرب طريقة يوتيوب بديلة.",
                 )
             else:
-                await send_safely(
-                    requester_channel,
-                    "تعذر تشغيل رابط يوتيوب بعد تجديد الرابط وتجربة الطريقة البديلة. "
-                    "لم أستبدل الرابط بمصدر آخر؛ قد يكون يوتيوب يحظر عنوان استضافة البوت.",
-                )
+                # All direct-URL refreshes and YouTube clients failed. Search the
+                # title on YouTube first; if that result fails, try SoundCloud.
+                fallback_stage = finished_track.get("fallback_stage")
+                fallback = None
+                if fallback_stage != "soundcloud":
+                    try:
+                        fallback = await find_named_fallback(
+                            finished_track.get("title", ""),
+                            prefer_soundcloud=(fallback_stage == "youtube"),
+                        )
+                    except Exception:
+                        logger.exception("Post-playback title fallback search failed")
+                if fallback:
+                    fallback["requester"] = finished_track.get("requester", "")
+                    queues.setdefault(guild.id, []).insert(0, (fallback, requester_channel))
+                    await send_safely(
+                        requester_channel,
+                        f"تعذر تشغيل الرابط؛ أجرب **{fallback['title']}** من "
+                        f"{'يوتيوب' if fallback.get('fallback_stage') == 'youtube' else 'ساوند كلاود'}.",
+                    )
+                else:
+                    await send_safely(
+                        requester_channel,
+                        "تعذر تشغيل الرابط، ولم أجد نتيجة قابلة للتجربة في يوتيوب أو ساوند كلاود. "
+                        "سأنتقل للأغنية التالية.",
+                    )
 
     if now_playing.get(guild.id) is finished_track:
         now_playing.pop(guild.id, None)
