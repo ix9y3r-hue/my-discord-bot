@@ -1445,9 +1445,6 @@ async def on_ready() -> None:
     if not STARTUP_NOTIFICATION_SENT:
         STARTUP_NOTIFICATION_SENT = True
         GATEWAY_DISCONNECTED = False
-        await notify_all_guilds(
-            "عاد البوت للعمل بعد إعادة التشغيل أو التحديث."
-        )
     elif GATEWAY_DISCONNECTED and not SHUTDOWN_REQUESTED:
         GATEWAY_DISCONNECTED = False
         await notify_all_guilds("عاد اتصال البوت إلى Discord بعد الانقطاع.")
