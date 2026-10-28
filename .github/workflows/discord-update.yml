@@ -1,9 +1,7 @@
-name: Discord update notifications
+name: Manual Discord update notification (avoid duplicate push alerts)
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
