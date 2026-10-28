@@ -83,7 +83,7 @@ BASE_YTDL = {
     "fragment_retries": 3,
     # Use mweb with the BgUtils PO Token provider installed in the container.
     # web_safari remains a fallback because its HLS formats may avoid GVS PO Tokens.
-    "extractor_args": {"youtube": {"player_client": ["mweb"]}},
+    "extractor_args": {"youtube": {"player_client": ["mweb", "tv", "web_safari"]}},
     # Let yt-dlp use Deno to solve YouTube JavaScript player challenges.
     "js_runtimes": {"deno": {}},
 }
@@ -92,7 +92,7 @@ ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
 # Try different official YouTube player clients if the default extraction fails.
 # They have different format availability, so trying them separately is more useful
 # than combining them into one extractor configuration.
-YOUTUBE_FALLBACK_CLIENTS = ("web_safari", "tv_embedded", "android_vr", "web_embedded")
+YOUTUBE_FALLBACK_CLIENTS = ("tv", "mweb", "web_safari", "tv_embedded", "android_vr", "web_embedded")
 ytdl_search_fallbacks = [
     yt_dlp.YoutubeDL({
         **BASE_YTDL,
