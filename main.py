@@ -83,7 +83,7 @@ BASE_YTDL = {
     "fragment_retries": 3,
     # Use mweb with the BgUtils PO Token provider installed in the container.
     # web_safari remains a fallback because its HLS formats may avoid GVS PO Tokens.
-    "extractor_args": {"youtube": {"player_client": ["web_safari"]}},
+    "extractor_args": {"youtube": {"player_client": ["mweb"]}},
     # Let yt-dlp use Deno to solve YouTube JavaScript player challenges.
     "js_runtimes": {"deno": {}},
 }
@@ -92,7 +92,7 @@ ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
 # Try different official YouTube player clients if the default extraction fails.
 # They have different format availability, so trying them separately is more useful
 # than combining them into one extractor configuration.
-YOUTUBE_FALLBACK_CLIENTS = ("mweb",)
+YOUTUBE_FALLBACK_CLIENTS = ("web_safari",)
 ytdl_search_fallbacks = [
     yt_dlp.YoutubeDL({
         **BASE_YTDL,
@@ -983,35 +983,50 @@ async def advance_after_track(
     requester_channel: discord.abc.Messageable,
     finished_ok: bool,
 ) -> None:
-    # A fresh URL from a different player client may avoid a YouTube CDN 403.
-    # Try each alternate client once, then use the existing SoundCloud fallback.
+    # YouTube sometimes returns a signed media URL that receives HTTP 403.
+    # Refresh the URL twice using mweb before trying the web_safari client.
     if (
         not finished_ok
         and guild.id not in skipped_guilds
         and is_youtube_query(finished_track.get("webpage", ""))
     ):
+        retry_count = int(finished_track.get("youtube_playback_retries", "0"))
         attempted_client = finished_track.get("youtube_client")
-        if attempted_client in YOUTUBE_FALLBACK_CLIENTS:
-            next_index = YOUTUBE_FALLBACK_CLIENTS.index(attempted_client) + 1
-        else:
-            next_index = 0
 
-        if next_index < len(YOUTUBE_FALLBACK_CLIENTS):
+        if retry_count < 2:
             retry_track: Track = {
                 **finished_track,
-                "youtube_client": YOUTUBE_FALLBACK_CLIENTS[next_index],
+                "youtube_client": "mweb",
+                "youtube_playback_retries": str(retry_count + 1),
             }
             queues.setdefault(guild.id, []).insert(0, (retry_track, requester_channel))
             await send_safely(
                 requester_channel,
-                f"تعذر تشغيل رابط يوتيوب بالطريقة الحالية؛ أجرب طريقة بديلة ({next_index + 1}/{len(YOUTUBE_FALLBACK_CLIENTS)}).",
+                f"يوتيوب رفض رابط الصوت؛ أجدد الرابط وأعيد المحاولة ({retry_count + 1}/2).",
             )
         else:
-            await send_safely(
-                requester_channel,
-                "تعذر تشغيل رابط يوتيوب بعد تجربة طرق التشغيل البديلة. "
-                "لم أستبدل الرابط بمصدر آخر؛ جرّب إعادة المحاولة لاحقًا.",
-            )
+            if attempted_client in YOUTUBE_FALLBACK_CLIENTS:
+                next_index = YOUTUBE_FALLBACK_CLIENTS.index(attempted_client) + 1
+            else:
+                next_index = 0
+
+            if next_index < len(YOUTUBE_FALLBACK_CLIENTS):
+                retry_track = {
+                    **finished_track,
+                    "youtube_client": YOUTUBE_FALLBACK_CLIENTS[next_index],
+                    "youtube_playback_retries": "2",
+                }
+                queues.setdefault(guild.id, []).insert(0, (retry_track, requester_channel))
+                await send_safely(
+                    requester_channel,
+                    "تعذر تشغيل رابط يوتيوب بعد تجديده؛ أجرب طريقة يوتيوب بديلة.",
+                )
+            else:
+                await send_safely(
+                    requester_channel,
+                    "تعذر تشغيل رابط يوتيوب بعد تجديد الرابط وتجربة الطريقة البديلة. "
+                    "لم أستبدل الرابط بمصدر آخر؛ قد يكون يوتيوب يحظر عنوان استضافة البوت.",
+                )
 
     if now_playing.get(guild.id) is finished_track:
         now_playing.pop(guild.id, None)
