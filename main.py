@@ -862,6 +862,26 @@ class QueueView(discord.ui.View):
         await self._refresh(interaction)
 
 
+def _apply_music_emojis(view: discord.ui.View, guild: discord.Guild) -> None:
+    """Resolve uploaded server emojis by name, keeping Unicode fallbacks if unavailable."""
+    emojis = {emoji.name: emoji for emoji in guild.emojis}
+    callback_names = {
+        "previous_button": "music_previous",
+        "stop_button": "music_stop",
+        "pause_button": "music_pause",
+        "skip_button": "music_next",
+        "repeat_button": "music_repeat",
+        "queue_button": "music_queue",
+        "volume_up_button": "music_volume",
+    }
+    for item in view.children:
+        callback = getattr(item, "callback", None)
+        callback_name = getattr(callback, "__name__", "")
+        emoji_name = callback_names.get(callback_name)
+        if emoji_name and emoji_name in emojis:
+            item.emoji = emojis[emoji_name]
+
+
 class PlayerView(discord.ui.View):
     def __init__(self, guild_id: int, embed: discord.Embed) -> None:
         super().__init__(timeout=None)
@@ -1053,9 +1073,11 @@ async def show_panel(
         embed.add_field(name="🙋 الطالب", value=track["requester"], inline=True)
     embed.set_footer(text=f"🔊 مستوى الصوت: {round(volume * 100)}%")
     try:
+        player_view = PlayerView(guild.id, embed)
+        _apply_music_emojis(player_view, guild)
         panels[guild.id] = await channel.send(
             embed=embed,
-            view=PlayerView(guild.id, embed),
+            view=player_view,
         )
     except discord.DiscordException:
         logger.exception("Could not send the player panel")
