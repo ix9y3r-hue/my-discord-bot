@@ -32,4 +32,4 @@ RUN python patch_main.py && python -m py_compile main.py temp_voice.py
 EXPOSE 8080
 # Start the PO Token provider on loopback only, then start the Discord bot.
 # yt-dlp's BgUtils plugin connects to http://127.0.0.1:4416.
-CMD ["sh", "-c", "cd /root/bgutil-ytdlp-pot-provider/server/node_modules && deno run --allow-env --allow-net --allow-ffi=. --allow-read=. ../src/main.ts --host 127.0.0.1 & exec python /app/main.py"]
+CMD ["sh", "-c", "(cd /root/bgutil-ytdlp-pot-provider/server/node_modules && deno run --allow-env --allow-net --allow-ffi=. --allow-read=. ../src/main.ts --host 127.0.0.1) & for i in $(seq 1 20); do python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:4416/ping', timeout=1).read()\" >/dev/null 2>&1 && break; sleep 1; done; exec python /app/main.py"]
