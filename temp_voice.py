@@ -172,16 +172,24 @@ class TemporaryVoice(commands.Cog):
     @app_commands.checks.has_permissions(manage_guild=True)
     async def setup_voice_panel(self, interaction: discord.Interaction) -> None:
         embed = discord.Embed(
-            title="لوحة التحكم بالرومات الصوتية المؤقتة",
+            title="لوحة التحكم | الرومات المؤقتة",
             description=(
-                "ادخل رومك المؤقت أولًا، ثم اختر الإعداد المطلوب من الأزرار.\n"
-                "تقدر تغيّر الاسم والخصوصية والدردشة والمنطقة وجودة الصوت، "
-                "وتدير الأعضاء بالدعوة والوثوق والحظر والإخراج ونقل الملكية.\n\n"
-                "الأزرار لا تعمل إلا لمالك الروم المؤقت."
+                "**طريقة الاستخدام**\n"
+                "1. ادخل الروم المؤقت الذي تملكه.\n"
+                "2. اختر الزر المناسب؛ ستظهر لك رسالة خاصة بنتيجة العملية.\n\n"
+                "**إعدادات الروم**\n"
+                "تغيير الاسم، حد الأعضاء، الخصوصية، الدردشة، المنطقة، جودة الصوت، والقفل والفتح.\n\n"
+                "**إدارة الأعضاء**\n"
+                "الدعوة، الوثوق، طلب الدخول، الإخراج، الحظر، رفع الحظر، ونقل الملكية.\n\n"
+                "**إدارة الروم**\n"
+                "إعادة الضبط تعيد الإعدادات الأساسية وتحذف الاستثناءات الخاصة، "
+                "وحذف الروم إجراء نهائي.\n\n"
+                "تعمل أدوات الإدارة لمالك الروم فقط. لا توجد مهام دورية إضافية؛ "
+                "تعمل اللوحة عند ضغط الأزرار فقط لتجنب استهلاك موارد بلا حاجة."
             ),
             color=discord.Color.blurple(),
         )
-        embed.set_footer(text="لوحة الرومات المؤقتة")
+        embed.set_footer(text="لوحة الرومات المؤقتة • التغييرات تُنفّذ عند الطلب فقط")
         await interaction.response.send_message(embed=embed, view=TempVoicePanel())
 
     @commands.Cog.listener()
@@ -457,12 +465,17 @@ class TempVoicePanel(discord.ui.View):
         if not c: return
         ow = c.overwrites_for(c.guild.default_role)
         private = ow.view_channel is False
-        ow.view_channel = None if private else False
-        ow.connect = False if not private else None
+        if private:
+            ow.view_channel = True
+            ow.connect = True
+        else:
+            ow.view_channel = False
+            ow.connect = False
         try:
             await c.set_permissions(c.guild.default_role, overwrite=ow)
-            await _reply(interaction, "تم جعل الروم عامًا." if private else "تم إخفاء الروم عن الأعضاء.")
-        except discord.HTTPException: await _reply(interaction, "تعذر تغيير الخصوصية.")
+            await _reply(interaction, "تم جعل الروم عامًا." if private else "تم إخفاء الروم وقفل الدخول عن الأعضاء.")
+        except discord.HTTPException:
+            await _reply(interaction, "تعذر تغيير الخصوصية.")
 
     @discord.ui.button(label="دردشة الروم", emoji="💬", style=discord.ButtonStyle.secondary, custom_id="tempvoice:text", row=0)
     async def text_chat(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -582,16 +595,35 @@ class TempVoicePanel(discord.ui.View):
         if not c: return
         owner = interaction.user
         try:
-            for target in list(c.overwrites):
-                if isinstance(target, discord.Member) and target.id != owner.id:
-                    await c.set_permissions(target, overwrite=None)
-            ow = discord.PermissionOverwrite(view_channel=True, connect=True, manage_channels=True, move_members=True, mute_members=True, deafen_members=True)
-            await c.set_permissions(owner, overwrite=ow)
-            await c.set_permissions(c.guild.default_role, overwrite=discord.PermissionOverwrite(view_channel=True, connect=True, send_messages=None))
-            await c.edit(user_limit=0, bitrate=c.guild.bitrate_limit, rtc_region=None)
-            await _reply(interaction, "تمت إعادة ضبط إعدادات الروم.")
+            # Apply the reset in one channel PATCH instead of one API request per
+            # overwrite plus another request for channel settings. This reduces
+            # network traffic, rate-limit pressure, and reset latency on Railway.
+            overwrites = {
+                c.guild.default_role: discord.PermissionOverwrite(
+                    view_channel=True,
+                    connect=True,
+                    send_messages=None,
+                ),
+                owner: discord.PermissionOverwrite(
+                    view_channel=True,
+                    connect=True,
+                    manage_channels=True,
+                    move_members=True,
+                    mute_members=True,
+                    deafen_members=True,
+                ),
+            }
+            await c.edit(
+                overwrites=overwrites,
+                user_limit=0,
+                bitrate=c.guild.bitrate_limit,
+                rtc_region=None,
+                reason=f"إعادة ضبط الروم بواسطة {owner}",
+            )
+            await _reply(interaction, "تمت إعادة ضبط إعدادات الروم وإزالة الاستثناءات الخاصة.")
         except (discord.HTTPException, AttributeError):
-            await _reply(interaction, "تعذر إعادة ضبط بعض الإعدادات. تحقق من صلاحيات البوت.")
+            logger.exception("Could not reset temporary room %s", c.id)
+            await _reply(interaction, "تعذر إعادة ضبط الإعدادات. تحقق من صلاحيات البوت.")
 
 
 class RegionSelect(discord.ui.View):
