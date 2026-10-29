@@ -888,10 +888,10 @@ class PlayerView(discord.ui.View):
         self.guild_id = guild_id
         self.embed = embed
         if guild_id in repeat_guilds:
-            self.repeat_button.style = discord.ButtonStyle.success
+            self.repeat_button.style = discord.ButtonStyle.danger
             self.repeat_button.label = "تكرار الأغنية"
         elif guild_id in queue_repeat_guilds:
-            self.repeat_button.style = discord.ButtonStyle.primary
+            self.repeat_button.style = discord.ButtonStyle.danger
             self.repeat_button.label = "تكرار الطابور"
         else:
             self.repeat_button.style = discord.ButtonStyle.secondary
@@ -1013,12 +1013,12 @@ class PlayerView(discord.ui.View):
         guild_id = self.guild_id
         if guild_id not in repeat_guilds and guild_id not in queue_repeat_guilds:
             repeat_guilds.add(guild_id)
-            button.style = discord.ButtonStyle.success
+            button.style = discord.ButtonStyle.danger
             button.label = "تكرار الأغنية"
         elif guild_id in repeat_guilds:
             repeat_guilds.discard(guild_id)
             queue_repeat_guilds.add(guild_id)
-            button.style = discord.ButtonStyle.primary
+            button.style = discord.ButtonStyle.danger
             button.label = "تكرار الطابور"
         else:
             queue_repeat_guilds.discard(guild_id)
@@ -1078,7 +1078,7 @@ async def show_panel(
     if bot_emoji:
         embed.set_author(name="مشغّل الموسيقى", icon_url=str(bot_emoji.url))
     else:
-        embed.set_author(name="مشغّل الموسيقى", icon_url=None)
+        embed.set_author(name="مشغّل الموسيقى")
     if stream.get("thumbnail"):
         embed.set_image(url=stream["thumbnail"])
     if stream.get("uploader"):
