@@ -955,7 +955,7 @@ class PlayerView(discord.ui.View):
             voice_client.stop()
         await interaction.response.send_message("⏹️ تم إيقاف التشغيل ومسح الطابور.")
 
-    @discord.ui.button(label="إيقاف مؤقت", emoji="⏸️", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="إيقاف مؤقت", emoji="⏸️", style=discord.ButtonStyle.secondary, row=1)
     async def pause_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
@@ -981,7 +981,7 @@ class PlayerView(discord.ui.View):
             return
         await interaction.response.edit_message(view=self)
 
-    @discord.ui.button(label="التالي", emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="التالي", emoji="⏭️", style=discord.ButtonStyle.secondary, row=1)
     async def skip_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
@@ -1013,7 +1013,7 @@ class PlayerView(discord.ui.View):
         label="التكرار متوقف",
         emoji="🔁",
         style=discord.ButtonStyle.secondary,
-        row=1,
+        row=2,
     )
     async def repeat_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
@@ -1035,7 +1035,7 @@ class PlayerView(discord.ui.View):
             button.label = "التكرار متوقف"
         await interaction.response.edit_message(view=self)
 
-    @discord.ui.button(label="قائمة الانتظار", emoji="📜", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="قائمة الانتظار", emoji="📜", style=discord.ButtonStyle.secondary, row=2)
     async def queue_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
@@ -1049,7 +1049,7 @@ class PlayerView(discord.ui.View):
                 view.content(), ephemeral=True
             )
 
-    @discord.ui.button(label="التبديل العشوائي", emoji="🔀", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="التبديل العشوائي", emoji="🔀", style=discord.ButtonStyle.secondary, row=2)
     async def shuffle_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
@@ -1066,13 +1066,13 @@ class PlayerView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="رفع الصوت", emoji="🔊", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="رفع الصوت", emoji="🔊", style=discord.ButtonStyle.secondary, row=3)
     async def volume_up_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
         await self._change_volume(interaction, VOLUME_STEP)
 
-    @discord.ui.button(label="خفض الصوت", emoji="🔉", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="خفض الصوت", emoji="🔉", style=discord.ButtonStyle.secondary, row=3)
     async def volume_down_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
