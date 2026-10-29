@@ -94,8 +94,10 @@ BASE_YTDL = {
     # Temporary diagnostic mode: reveal whether yt-dlp loads bgutil and requests a PO Token.
     # Turn this off after checking Railway logs to avoid verbose routine logs.
     "verbose": True,
-    # Keep one client for this diagnostic run; avoid repeated client-rotation attempts.
-    "extractor_args": {"youtube": {"player_client": ["mweb"]}},
+    # Official bgutil guidance: if a client fails before requesting a PO Token,
+    # let yt-dlp try these supported clients within the same extraction call.
+    # This is not an external retry loop and does not enable cookies.
+    "extractor_args": {"youtube": {"player_client": ["mweb", "tv", "web_safari"]}},
     # Let yt-dlp use Deno to solve YouTube JavaScript player challenges.
     "js_runtimes": {"deno": {}},
 }
