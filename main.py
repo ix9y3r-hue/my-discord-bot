@@ -1,5 +1,6 @@
 import asyncio
 import json
+import random
 import time
 import logging
 import os
@@ -1046,6 +1047,23 @@ class PlayerView(discord.ui.View):
             await interaction.response.send_message(
                 view.content(), ephemeral=True
             )
+
+    @discord.ui.button(label="التبديل العشوائي", emoji="🔀", style=discord.ButtonStyle.secondary, row=1)
+    async def shuffle_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        queue = queues.get(self.guild_id, [])
+        if len(queue) < 2:
+            await interaction.response.send_message(
+                "أضف أغنيتين على الأقل إلى قائمة الانتظار لاستخدام التبديل العشوائي.",
+                ephemeral=True,
+            )
+            return
+        random.shuffle(queue)
+        await interaction.response.send_message(
+            "تم خلط الأغاني القادمة في قائمة الانتظار.",
+            ephemeral=True,
+        )
 
     @discord.ui.button(label="رفع الصوت", emoji="🔊", style=discord.ButtonStyle.secondary, row=1)
     async def volume_up_button(
