@@ -608,11 +608,23 @@ async def find_named_fallback(title: str, *, prefer_soundcloud: bool = False) ->
 async def find_track(
     search: str,
     status_channel: discord.abc.Messageable | None = None,
+    *,
+    soundcloud_only: bool = False,
 ) -> Track:
     last_error: Exception | None = None
     direct_youtube_url = search.startswith(("http://", "https://")) and is_youtube_query(search)
 
-    for query in build_queries(search):
+    # "ش س" means SoundCloud-only: never query or inspect YouTube for this request.
+    if soundcloud_only and search.startswith(("http://", "https://")):
+        if "soundcloud.com" not in search.lower():
+            raise ValueError("أمر ش س يشغّل ساوند كلاود فقط. أرسل اسم الأغنية أو رابطًا من ساوند كلاود.")
+        queries = [search]
+    elif soundcloud_only:
+        queries = [f"scsearch1:{search}"]
+    else:
+        queries = build_queries(search)
+
+    for query in queries:
         try:
             data = await extract_info(query, flat=True)
         except Exception as exc:
@@ -630,6 +642,12 @@ async def find_track(
         if direct_youtube_url:
             track["requested_direct_youtube"] = "true"
         return track
+
+    # SoundCloud-only requests must never fall through to YouTube metadata or search.
+    if soundcloud_only:
+        if last_error:
+            logger.error("SoundCloud-only search failed", exc_info=last_error)
+        raise ValueError("ما حصلت الأغنية في ساوند كلاود. جرّب اسمًا أوضح أو رابط ساوند كلاود آخر.")
 
     # If a direct YouTube link fails, tell the requester and search SoundCloud immediately.
     if direct_youtube_url:
@@ -2073,8 +2091,14 @@ async def join_voice(ctx: commands.Context) -> None:
 @commands.guild_only()
 async def play_song(ctx: commands.Context, *, search: str | None = None) -> None:
     if not search:
-        await ctx.send("اكتب اسم الأغنية بعد الأمر، مثل: `ش اسم الأغنية`")
+        await ctx.send("اكتب اسم الأغنية بعد الأمر، مثل: `ش اسم الأغنية` أو `ش س اسم الأغنية` للبحث في ساوند كلاود فقط.")
         return
+    soundcloud_only = search == "س" or search.startswith("س ")
+    if soundcloud_only:
+        search = search[1:].strip()
+        if not search:
+            await ctx.send("اكتب اسم الأغنية بعد `ش س`، مثال: `ش س اسم الأغنية`")
+            return
     if "spotify.com" in search:
         await ctx.send(
             "روابط سبوتيفاي غير مدعومة مباشرة. اكتب اسم الأغنية وأنا أبحث عنها."
@@ -2111,7 +2135,13 @@ async def play_song(ctx: commands.Context, *, search: str | None = None) -> None
     stop_join_sound(ctx.guild, voice_client)
     await ctx.send(f"أبحث عن **{search}**...")
     try:
-        track = await find_track(search, status_channel=ctx.channel)
+        if soundcloud_only:
+            await ctx.send(f"أبحث عن **{search}** في ساوند كلاود فقط، بدون البحث في يوتيوب...")
+        track = await find_track(
+            search,
+            status_channel=ctx.channel,
+            soundcloud_only=soundcloud_only,
+        )
     except ValueError as exc:
         await ctx.send(str(exc))
         return
