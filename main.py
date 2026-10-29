@@ -872,6 +872,7 @@ def _apply_music_emojis(view: discord.ui.View, guild: discord.Guild) -> None:
         "إيقاف مؤقت": ("music_pause",),
         "استئناف": ("music_play",),
         "التالي": ("music_next",),
+        "التبديل العشوائي": ("music_shuffle",),
         "التكرار متوقف": ("music_repeat",),
         "تكرار الأغنية": ("music_repeat",),
         "تكرار الطابور": ("music_repeat",),
