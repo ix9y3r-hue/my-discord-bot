@@ -934,7 +934,7 @@ class PlayerView(discord.ui.View):
         voice_client.stop()
         await interaction.response.defer()
 
-    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.secondary, row=0)
     async def stop_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
@@ -947,7 +947,7 @@ class PlayerView(discord.ui.View):
             voice_client.stop()
         await interaction.response.send_message("⏹️ تم إيقاف التشغيل ومسح الطابور.")
 
-    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.secondary, row=0)
     async def pause_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
@@ -995,6 +995,7 @@ class PlayerView(discord.ui.View):
 
     @discord.ui.button(
         label="التكرار متوقف",
+        emoji="🔁",
         style=discord.ButtonStyle.secondary,
         row=1,
     )
