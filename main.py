@@ -863,7 +863,7 @@ class QueueView(discord.ui.View):
 
 
 def _apply_music_emojis(view: discord.ui.View, guild: discord.Guild) -> None:
-    """Resolve uploaded server emojis by name, keeping Unicode fallbacks if unavailable."""
+    """Use server emojis when present; retain Unicode fallbacks without extra requests."""
     emojis = {emoji.name: emoji for emoji in guild.emojis}
     callback_names = {
         "previous_button": "music_previous",
@@ -911,7 +911,7 @@ class PlayerView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="السابق", emoji="⏮️", style=discord.ButtonStyle.secondary, row=0)
     async def previous_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
@@ -934,7 +934,7 @@ class PlayerView(discord.ui.View):
         voice_client.stop()
         await interaction.response.defer()
 
-    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="إيقاف", emoji="⏹️", style=discord.ButtonStyle.secondary, row=0)
     async def stop_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
@@ -947,17 +947,25 @@ class PlayerView(discord.ui.View):
             voice_client.stop()
         await interaction.response.send_message("⏹️ تم إيقاف التشغيل ومسح الطابور.")
 
-    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="إيقاف مؤقت", emoji="⏸️", style=discord.ButtonStyle.secondary, row=0)
     async def pause_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
         voice_client = interaction.guild.voice_client
         if voice_client and voice_client.is_playing():
             voice_client.pause()
-            button.emoji = "▶️"
+            button.emoji = next(
+                (emoji for emoji in interaction.guild.emojis if emoji.name == "music_play"),
+                "▶️",
+            )
+            button.label = "استئناف"
         elif voice_client and voice_client.is_paused():
             voice_client.resume()
-            button.emoji = "⏸️"
+            button.emoji = next(
+                (emoji for emoji in interaction.guild.emojis if emoji.name == "music_pause"),
+                "⏸️",
+            )
+            button.label = "إيقاف مؤقت"
         else:
             await interaction.response.send_message(
                 "ما فيه أغنية تعمل حاليًا.", ephemeral=True
@@ -965,7 +973,7 @@ class PlayerView(discord.ui.View):
             return
         await interaction.response.edit_message(view=self)
 
-    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="التالي", emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
     async def skip_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
@@ -1019,7 +1027,7 @@ class PlayerView(discord.ui.View):
             button.label = "التكرار متوقف"
         await interaction.response.edit_message(view=self)
 
-    @discord.ui.button(emoji="📜", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="قائمة الانتظار", emoji="📜", style=discord.ButtonStyle.secondary, row=1)
     async def queue_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
@@ -1033,7 +1041,7 @@ class PlayerView(discord.ui.View):
                 view.content(), ephemeral=True
             )
 
-    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="رفع الصوت", emoji="🔊", style=discord.ButtonStyle.secondary, row=1)
     async def volume_up_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
@@ -1059,20 +1067,28 @@ async def show_panel(
     volume = volumes.get(guild.id, DEFAULT_VOLUME)
     safe_title = track["title"].replace("[", "(").replace("]", ")")
     embed = discord.Embed(
-        title="🎧 Now Playing",
-        description=f"**[{safe_title}]({track['webpage']})**",
-        color=0x5865F2,
+        title="بوت الموسيقى",
+        description=f"**[{safe_title}]({track['webpage']})**\n\nاستمتع بالموسيقى وتحكّم بالتشغيل من الأزرار بالأسفل.",
+        color=0xE32636,
     )
+    bot_emoji = next(
+        (emoji for emoji in guild.emojis if emoji.name == "music_bot"),
+        None,
+    )
+    if bot_emoji:
+        embed.set_author(name="مشغّل الموسيقى", icon_url=str(bot_emoji.url))
+    else:
+        embed.set_author(name="مشغّل الموسيقى", icon_url=None)
     if stream.get("thumbnail"):
-        embed.set_thumbnail(url=stream["thumbnail"])
+        embed.set_image(url=stream["thumbnail"])
     if stream.get("uploader"):
-        embed.add_field(name="👤 الفنان", value=str(stream["uploader"]), inline=True)
+        embed.add_field(name="الفنان", value=str(stream["uploader"])[:1024], inline=True)
     duration = format_duration(stream.get("duration"))
     if duration:
-        embed.add_field(name="⏱️ المدة", value=duration, inline=True)
+        embed.add_field(name="مدة الأغنية", value=duration, inline=True)
     if track.get("requester"):
-        embed.add_field(name="🙋 الطالب", value=track["requester"], inline=True)
-    embed.set_footer(text=f"🔊 مستوى الصوت: {round(volume * 100)}%")
+        embed.add_field(name="طلبها", value=str(track["requester"])[:1024], inline=True)
+    embed.set_footer(text=f"مستوى الصوت: {round(volume * 100)}%  •  استخدم الأزرار للتحكم")
     try:
         player_view = PlayerView(guild.id, embed)
         _apply_music_emojis(player_view, guild)
