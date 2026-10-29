@@ -1196,7 +1196,8 @@ async def play_next(guild: discord.Guild) -> None:
                         fallback = await find_named_fallback(
                             track.get("title", ""),
                             prefer_soundcloud=(
-                                bool(track.get("requested_direct_youtube"))
+                                is_youtube_query(track.get("webpage", ""))
+                                or bool(track.get("requested_direct_youtube"))
                                 or fallback_stage == "youtube"
                             ),
                         )
@@ -1223,7 +1224,7 @@ async def play_next(guild: discord.Guild) -> None:
                         continue
 
                 if "sign in to confirm you're not a bot" in error_text or "confirm you're not a bot" in error_text:
-                    reason = "يوتيوب طلب تحققًا من البوت، وجربت أكثر من طريقة لاستخراج الصوت لكنها لم تنجح."
+                    reason = "يوتيوب طلب تحققًا من البوت، لذلك سأنتقل إلى البحث في ساوند كلاود."
                 elif "http error 403" in error_text or "status code 403" in error_text:
                     reason = "المصدر رفض رابط البث (403)، وقد يكون الرابط أو عنوان الاستضافة مقيّدًا."
                 elif "requested format is not available" in error_text or "requested format" in error_text:
