@@ -865,22 +865,25 @@ class QueueView(discord.ui.View):
 def _apply_music_emojis(view: discord.ui.View, guild: discord.Guild) -> None:
     """Use server emojis when present; retain Unicode fallbacks without extra requests."""
     emojis = {emoji.name: emoji for emoji in guild.emojis}
+    # Prefer the actual names used by the uploaded Discord emoji pack.
     callback_names = {
-        "previous_button": "music_previous",
-        "stop_button": "music_stop",
-        "pause_button": "music_pause",
-        "skip_button": "music_next",
-        "repeat_button": "music_repeat",
-        "queue_button": "music_queue",
-        "volume_up_button": "music_volume",
-        "volume_down_button": "music_lower",
+        "previous_button": ("music_previous", "emoji_38"),
+        "stop_button": ("music_stop", "emoji_36"),
+        "pause_button": ("music_pause", "emoji_35"),
+        "skip_button": ("music_next", "emoji_37"),
+        "repeat_button": ("music_repeat", "emoji_40"),
+        "queue_button": ("music_queue", "emoji_41"),
+        "volume_up_button": ("music_volume", "emoji_24"),
+        "volume_down_button": ("music_lower",),
     }
     for item in view.children:
         callback = getattr(item, "callback", None)
         callback_name = getattr(callback, "__name__", "")
-        emoji_name = callback_names.get(callback_name)
-        if emoji_name and emoji_name in emojis:
-            item.emoji = emojis[emoji_name]
+        emoji_names = callback_names.get(callback_name, ())
+        for emoji_name in emoji_names:
+            if emoji_name in emojis:
+                item.emoji = emojis[emoji_name]
+                break
 
 
 class PlayerView(discord.ui.View):
@@ -956,14 +959,14 @@ class PlayerView(discord.ui.View):
         if voice_client and voice_client.is_playing():
             voice_client.pause()
             button.emoji = next(
-                (emoji for emoji in interaction.guild.emojis if emoji.name == "music_play"),
+                (emoji for emoji in interaction.guild.emojis if emoji.name in ("music_play", "emoji_34")),
                 "▶️",
             )
             button.label = "استئناف"
         elif voice_client and voice_client.is_paused():
             voice_client.resume()
             button.emoji = next(
-                (emoji for emoji in interaction.guild.emojis if emoji.name == "music_pause"),
+                (emoji for emoji in interaction.guild.emojis if emoji.name in ("music_pause", "emoji_35")),
                 "⏸️",
             )
             button.label = "إيقاف مؤقت"
@@ -1087,7 +1090,7 @@ async def show_panel(
     else:
         embed.set_author(name="مشغّل الموسيقى")
     if stream.get("thumbnail"):
-        embed.set_image(url=stream["thumbnail"])
+        embed.set_thumbnail(url=stream["thumbnail"])
     if stream.get("uploader"):
         embed.add_field(name="الفنان", value=str(stream["uploader"])[:1024], inline=True)
     duration = format_duration(stream.get("duration"))
