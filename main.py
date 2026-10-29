@@ -873,6 +873,7 @@ def _apply_music_emojis(view: discord.ui.View, guild: discord.Guild) -> None:
         "repeat_button": "music_repeat",
         "queue_button": "music_queue",
         "volume_up_button": "music_volume",
+        "volume_down_button": "music_lower",
     }
     for item in view.children:
         callback = getattr(item, "callback", None)
@@ -1046,6 +1047,12 @@ class PlayerView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
         await self._change_volume(interaction, VOLUME_STEP)
+
+    @discord.ui.button(label="خفض الصوت", emoji="🔉", style=discord.ButtonStyle.secondary, row=1)
+    async def volume_down_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await self._change_volume(interaction, -VOLUME_STEP)
 
 
 async def show_panel(
