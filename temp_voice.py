@@ -158,7 +158,7 @@ class TemporaryVoice(commands.Cog):
                 "- تقدر تغيّر اسم الروم وتتحكم بمن يدخل إليه.\n"
                 "- يُحذف الروم تلقائيًا عندما يصبح فارغًا."
             ),
-            color=discord.Color.blurple(),
+            color=discord.Color.from_rgb(220, 20, 60),
         )
         embed.set_footer(text="إعداد النظام مرة واحدة فقط")
         await interaction.response.send_message(embed=embed)
@@ -187,7 +187,7 @@ class TemporaryVoice(commands.Cog):
                 "تعمل أدوات الإدارة لمالك الروم فقط. لا توجد مهام دورية إضافية؛ "
                 "تعمل اللوحة عند ضغط الأزرار فقط لتجنب استهلاك موارد بلا حاجة."
             ),
-            color=discord.Color.blurple(),
+            color=discord.Color.from_rgb(220, 20, 60),
         )
         embed.set_footer(text="لوحة الرومات المؤقتة • التغييرات تُنفّذ عند الطلب فقط")
         await interaction.response.send_message(embed=embed, view=TempVoicePanel())
@@ -514,7 +514,7 @@ class TempVoicePanel(discord.ui.View):
             await _reply(interaction, "تم فتح الروم." if locked else "تم قفل الروم.")
         except discord.HTTPException: await _reply(interaction, "تعذر قفل الروم أو فتحه.")
 
-    @discord.ui.button(label="فتح", emoji="🔓", style=discord.ButtonStyle.secondary, custom_id="tempvoice:unlock", row=1)
+    @discord.ui.button(label="فتح", emoji="🔓", style=discord.ButtonStyle.danger, custom_id="tempvoice:unlock", row=1)
     async def unlock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         c = await _room_or_reply(interaction)
         if not c: return
@@ -531,7 +531,7 @@ class TempVoicePanel(discord.ui.View):
     async def untrust(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "إلغاء الوثوق", "آيدي العضو", "room_untrust")
 
-    @discord.ui.button(label="دعوة", emoji="➕", style=discord.ButtonStyle.secondary, custom_id="tempvoice:invite", row=2)
+    @discord.ui.button(label="دعوة", emoji="➕", style=discord.ButtonStyle.danger, custom_id="tempvoice:invite", row=2)
     async def invite(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "دعوة عضو", "آيدي العضو", "room_invite")
 
@@ -547,11 +547,11 @@ class TempVoicePanel(discord.ui.View):
     async def kick(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "إخراج عضو", "آيدي العضو", "room_kick")
 
-    @discord.ui.button(label="حظر", emoji="⛔", style=discord.ButtonStyle.secondary, custom_id="tempvoice:block", row=2)
+    @discord.ui.button(label="حظر", emoji="⛔", style=discord.ButtonStyle.danger, custom_id="tempvoice:block", row=2)
     async def block(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "حظر عضو من الروم", "آيدي العضو", "room_block")
 
-    @discord.ui.button(label="رفع الحظر", emoji="☑️", style=discord.ButtonStyle.secondary, custom_id="tempvoice:unblock", row=3)
+    @discord.ui.button(label="رفع الحظر", emoji="☑️", style=discord.ButtonStyle.danger, custom_id="tempvoice:unblock", row=3)
     async def unblock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "رفع الحظر", "آيدي العضو", "room_unblock")
 
@@ -589,7 +589,7 @@ class TempVoicePanel(discord.ui.View):
             await c.delete(reason=f"حذف الروم بواسطة {interaction.user}")
         except discord.HTTPException: logger.exception("Could not delete temporary room %s", c.id)
 
-    @discord.ui.button(label="إعادة ضبط", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="tempvoice:reset", row=3)
+    @discord.ui.button(label="إعادة ضبط", emoji="🔄", style=discord.ButtonStyle.danger, custom_id="tempvoice:reset", row=3)
     async def reset(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         c = await _room_or_reply(interaction)
         if not c: return
