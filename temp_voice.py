@@ -158,7 +158,7 @@ class TemporaryVoice(commands.Cog):
                 "- تقدر تغيّر اسم الروم وتتحكم بمن يدخل إليه.\n"
                 "- يُحذف الروم تلقائيًا عندما يصبح فارغًا."
             ),
-            color=discord.Color.blurple(),
+            color=discord.Color.from_rgb(220, 20, 60),
         )
         embed.set_footer(text="إعداد النظام مرة واحدة فقط")
         await interaction.response.send_message(embed=embed)
@@ -187,10 +187,29 @@ class TemporaryVoice(commands.Cog):
                 "تعمل أدوات الإدارة لمالك الروم فقط. لا توجد مهام دورية إضافية؛ "
                 "تعمل اللوحة عند ضغط الأزرار فقط لتجنب استهلاك موارد بلا حاجة."
             ),
-            color=discord.Color.blurple(),
+            color=discord.Color.from_rgb(220, 20, 60),
         )
         embed.set_footer(text="لوحة الرومات المؤقتة • التغييرات تُنفّذ عند الطلب فقط")
-        await interaction.response.send_message(embed=embed, view=TempVoicePanel())
+        panel = TempVoicePanel()
+        _apply_panel_emojis(panel, interaction.guild, {
+            "tempvoice:rename": "tv_rename",
+            "tempvoice:privacy": "tv_shield",
+            "tempvoice:region": "tv_region",
+            "tempvoice:bitrate": "tv_quality",
+            "tempvoice:lock": "tv_lock",
+            "tempvoice:unlock": "tv_unlock",
+            "tempvoice:trust": "tv_trust",
+            "tempvoice:untrust": "tv_shield",
+            "tempvoice:invite": "tv_invite",
+            "tempvoice:uninvite": "tv_remove",
+            "tempvoice:kick": "tv_remove",
+            "tempvoice:block": "tv_shield",
+            "tempvoice:unblock": "tv_trust",
+            "tempvoice:claim": "tv_crown",
+            "tempvoice:transfer": "tv_crown",
+            "tempvoice:delete": "tv_delete",
+        })
+        await interaction.response.send_message(embed=embed, view=panel)
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
@@ -440,6 +459,22 @@ class KnockModal(discord.ui.Modal, title="طلب دخول الروم"):
             await _reply(interaction, "تعذر إرسال الطلب.")
 
 
+def _apply_panel_emojis(
+    view: discord.ui.View,
+    guild: discord.Guild | None,
+    emoji_map: dict[str, str],
+) -> None:
+    """Apply uploaded server emojis by name; leave Unicode fallbacks if missing."""
+    if guild is None:
+        return
+    emojis = {emoji.name: emoji for emoji in guild.emojis}
+    for item in view.children:
+        custom_id = getattr(item, "custom_id", None)
+        emoji_name = emoji_map.get(custom_id)
+        if emoji_name and emoji_name in emojis:
+            item.emoji = emojis[emoji_name]
+
+
 class TempVoicePanel(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=None)
@@ -502,7 +537,7 @@ class TempVoicePanel(discord.ui.View):
         c = await _room_or_reply(interaction)
         if c: await interaction.response.send_modal(ArabicRoomModal("جودة الصوت", "معدل البت بالكيلوبت (8-384)", "room_bitrate", default=str(c.bitrate // 1000), max_length=3))
 
-    @discord.ui.button(label="قفل", emoji="🔒", style=discord.ButtonStyle.secondary, custom_id="tempvoice:lock", row=1)
+    @discord.ui.button(label="قفل", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="tempvoice:lock", row=1)
     async def lock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         c = await _room_or_reply(interaction)
         if not c: return
@@ -527,7 +562,7 @@ class TempVoicePanel(discord.ui.View):
     async def trust(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "إضافة عضو موثوق", "آيدي العضو", "room_trust")
 
-    @discord.ui.button(label="إلغاء الوثوق", emoji="🚫", style=discord.ButtonStyle.secondary, custom_id="tempvoice:untrust", row=1)
+    @discord.ui.button(label="إلغاء الوثوق", emoji="🚫", style=discord.ButtonStyle.danger, custom_id="tempvoice:untrust", row=1)
     async def untrust(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "إلغاء الوثوق", "آيدي العضو", "room_untrust")
 
@@ -543,11 +578,11 @@ class TempVoicePanel(discord.ui.View):
     async def knock(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.send_modal(KnockModal())
 
-    @discord.ui.button(label="إخراج عضو", emoji="👋", style=discord.ButtonStyle.secondary, custom_id="tempvoice:kick", row=2)
+    @discord.ui.button(label="إخراج عضو", emoji="👋", style=discord.ButtonStyle.danger, custom_id="tempvoice:kick", row=2)
     async def kick(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "إخراج عضو", "آيدي العضو", "room_kick")
 
-    @discord.ui.button(label="حظر", emoji="⛔", style=discord.ButtonStyle.secondary, custom_id="tempvoice:block", row=2)
+    @discord.ui.button(label="حظر", emoji="⛔", style=discord.ButtonStyle.danger, custom_id="tempvoice:block", row=2)
     async def block(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.modal(interaction, "حظر عضو من الروم", "آيدي العضو", "room_block")
 
@@ -589,7 +624,7 @@ class TempVoicePanel(discord.ui.View):
             await c.delete(reason=f"حذف الروم بواسطة {interaction.user}")
         except discord.HTTPException: logger.exception("Could not delete temporary room %s", c.id)
 
-    @discord.ui.button(label="إعادة ضبط", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="tempvoice:reset", row=3)
+    @discord.ui.button(label="إعادة ضبط", emoji="🔄", style=discord.ButtonStyle.danger, custom_id="tempvoice:reset", row=3)
     async def reset(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         c = await _room_or_reply(interaction)
         if not c: return
