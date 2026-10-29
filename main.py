@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import random
 import time
@@ -93,7 +94,7 @@ BASE_YTDL = {
     "fragment_retries": 1,
     # Temporary diagnostic mode: reveal whether yt-dlp loads bgutil and requests a PO Token.
     # Turn this off after checking Railway logs to avoid verbose routine logs.
-    "verbose": True,
+    "verbose": os.getenv("YTDLP_VERBOSE", "").strip() == "1",
     # Official bgutil guidance: if a client fails before requesting a PO Token,
     # let yt-dlp try these supported clients within the same extraction call.
     # This is not an external retry loop and does not enable cookies.
@@ -101,6 +102,30 @@ BASE_YTDL = {
     # Let yt-dlp use Deno to solve YouTube JavaScript player challenges.
     "js_runtimes": {"deno": {}},
 }
+# --- Optional YouTube access settings -------------------------------------
+# Nothing here is active unless you add the variable in Railway > Variables.
+# YT_PROXY        : address of a proxy, e.g. http://user:pass@host:port
+# YT_COOKIES_B64  : your cookies.txt content encoded as base64 (never logged)
+_yt_proxy = os.getenv("YT_PROXY", "").strip()
+if _yt_proxy:
+    BASE_YTDL["proxy"] = _yt_proxy
+    BASE_YTDL.pop("source_address", None)
+_yt_cookies_b64 = os.getenv("YT_COOKIES_B64", "").strip()
+if _yt_cookies_b64:
+    try:
+        _cookie_path = os.path.join(DATA_DIR, "yt_cookies.txt")
+        with open(_cookie_path, "wb") as _cookie_file:
+            _cookie_file.write(base64.b64decode(_yt_cookies_b64))
+        try:
+            os.chmod(_cookie_path, 0o600)
+        except OSError:
+            pass
+        BASE_YTDL["cookiefile"] = _cookie_path
+    except Exception:
+        logging.getLogger("discord_music_bot").warning(
+            "YT_COOKIES_B64 is set but could not be decoded; continuing without cookies"
+        )
+
 ytdl_search = yt_dlp.YoutubeDL({**BASE_YTDL, "extract_flat": "in_playlist"})
 ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
 # Use the documented mweb + PO-token setup; do not rotate through clients on each failure.
