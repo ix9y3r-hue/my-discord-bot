@@ -190,7 +190,26 @@ class TemporaryVoice(commands.Cog):
             color=discord.Color.from_rgb(220, 20, 60),
         )
         embed.set_footer(text="لوحة الرومات المؤقتة • التغييرات تُنفّذ عند الطلب فقط")
-        await interaction.response.send_message(embed=embed, view=TempVoicePanel())
+        panel = TempVoicePanel()
+        _apply_panel_emojis(panel, interaction.guild, {
+            "tempvoice:rename": "tv_rename",
+            "tempvoice:privacy": "tv_shield",
+            "tempvoice:region": "tv_region",
+            "tempvoice:bitrate": "tv_quality",
+            "tempvoice:lock": "tv_lock",
+            "tempvoice:unlock": "tv_unlock",
+            "tempvoice:trust": "tv_trust",
+            "tempvoice:untrust": "tv_shield",
+            "tempvoice:invite": "tv_invite",
+            "tempvoice:uninvite": "tv_remove",
+            "tempvoice:kick": "tv_remove",
+            "tempvoice:block": "tv_shield",
+            "tempvoice:unblock": "tv_trust",
+            "tempvoice:claim": "tv_crown",
+            "tempvoice:transfer": "tv_crown",
+            "tempvoice:delete": "tv_delete",
+        })
+        await interaction.response.send_message(embed=embed, view=panel)
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
@@ -438,6 +457,22 @@ class KnockModal(discord.ui.Modal, title="طلب دخول الروم"):
             await _reply(interaction, "تعذر إرسال الطلب؛ قد تكون الرسائل الخاصة مقفلة.")
         except (ValueError, discord.HTTPException):
             await _reply(interaction, "تعذر إرسال الطلب.")
+
+
+def _apply_panel_emojis(
+    view: discord.ui.View,
+    guild: discord.Guild | None,
+    emoji_map: dict[str, str],
+) -> None:
+    """Apply uploaded server emojis by name; leave Unicode fallbacks if missing."""
+    if guild is None:
+        return
+    emojis = {emoji.name: emoji for emoji in guild.emojis}
+    for item in view.children:
+        custom_id = getattr(item, "custom_id", None)
+        emoji_name = emoji_map.get(custom_id)
+        if emoji_name and emoji_name in emojis:
+            item.emoji = emojis[emoji_name]
 
 
 class TempVoicePanel(discord.ui.View):
