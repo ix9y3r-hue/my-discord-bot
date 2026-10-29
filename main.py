@@ -91,8 +91,10 @@ BASE_YTDL = {
     "retries": 1,
     "extractor_retries": 1,
     "fragment_retries": 1,
-    # yt-dlp recommends mweb with an automatic PO-token provider. Keep one client
-    # to avoid repeated requests when the Railway egress IP is rejected by YouTube.
+    # Temporary diagnostic mode: reveal whether yt-dlp loads bgutil and requests a PO Token.
+    # Turn this off after checking Railway logs to avoid verbose routine logs.
+    "verbose": True,
+    # Keep one client for this diagnostic run; avoid repeated client-rotation attempts.
     "extractor_args": {"youtube": {"player_client": ["mweb"]}},
     # Let yt-dlp use Deno to solve YouTube JavaScript player challenges.
     "js_runtimes": {"deno": {}},
@@ -537,7 +539,8 @@ async def extract_youtube_info_with_client(
 def build_queries(search: str) -> list[str]:
     if search.startswith(("http://", "https://")):
         return [search]
-    return [f"scsearch1:{search}", f"ytsearch1:{search}"]
+    # The user's requested order: try YouTube first, then SoundCloud only if needed.
+    return [f"ytsearch1:{search}", f"scsearch1:{search}"]
 
 
 async def youtube_title_from_oembed(url: str) -> str | None:
