@@ -863,26 +863,32 @@ class QueueView(discord.ui.View):
 
 
 def _apply_music_emojis(view: discord.ui.View, guild: discord.Guild) -> None:
-    """Use server emojis when present; retain Unicode fallbacks without extra requests."""
-    emojis = {emoji.name: emoji for emoji in guild.emojis}
-    # Prefer the actual names used by the uploaded Discord emoji pack.
-    callback_names = {
-        "previous_button": ("music_previous", "emoji_38"),
-        "stop_button": ("music_stop", "emoji_36"),
-        "pause_button": ("music_pause", "emoji_35"),
-        "skip_button": ("music_next", "emoji_37"),
-        "repeat_button": ("music_repeat", "emoji_40"),
-        "queue_button": ("music_queue", "emoji_41"),
-        "volume_up_button": ("music_volume", "emoji_24"),
-        "volume_down_button": ("music_lower",),
+    """Assign custom server emojis by stable button labels, not callback internals."""
+    emojis_by_name = {}
+    for emoji in guild.emojis:
+        # Keep all duplicates so we don't accidentally discard same-named uploaded icons.
+        emojis_by_name.setdefault(emoji.name, []).append(emoji)
+
+    label_names = {
+        "السابق": ("emoji_38", "music_previous"),
+        "إيقاف": ("emoji_36", "music_stop"),
+        "إيقاف مؤقت": ("emoji_35", "music_pause"),
+        "التالي": ("emoji_37", "music_next"),
+        "التكرار متوقف": ("emoji_40", "music_repeat"),
+        "تكرار الأغنية": ("emoji_40", "music_repeat"),
+        "تكرار الطابور": ("emoji_40", "music_repeat"),
+        "قائمة الانتظار": ("emoji_41", "music_queue"),
+        "رفع الصوت": ("emoji_24", "music_volume"),
+        # No custom lower-volume emoji was confirmed as uploaded, so keep its Unicode icon.
     }
     for item in view.children:
-        callback = getattr(item, "callback", None)
-        callback_name = getattr(callback, "__name__", "")
-        emoji_names = callback_names.get(callback_name, ())
-        for emoji_name in emoji_names:
-            if emoji_name in emojis:
-                item.emoji = emojis[emoji_name]
+        if not isinstance(item, discord.ui.Button):
+            continue
+        names = label_names.get(item.label or "", ())
+        for name in names:
+            matches = emojis_by_name.get(name)
+            if matches:
+                item.emoji = matches[0]
                 break
 
 
