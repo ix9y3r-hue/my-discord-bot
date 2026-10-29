@@ -863,32 +863,28 @@ class QueueView(discord.ui.View):
 
 
 def _apply_music_emojis(view: discord.ui.View, guild: discord.Guild) -> None:
-    """Assign custom server emojis by stable button labels, not callback internals."""
-    emojis_by_name = {}
-    for emoji in guild.emojis:
-        # Keep all duplicates so we don't accidentally discard same-named uploaded icons.
-        emojis_by_name.setdefault(emoji.name, []).append(emoji)
-
+    """Apply the exact uploaded emoji names supplied for the music panel."""
+    emojis = {emoji.name: emoji for emoji in guild.emojis}
     label_names = {
-        "السابق": ("emoji_38", "music_previous"),
-        "إيقاف": ("emoji_36", "music_stop"),
-        "إيقاف مؤقت": ("emoji_35", "music_pause"),
-        "التالي": ("emoji_37", "music_next"),
-        "التكرار متوقف": ("emoji_40", "music_repeat"),
-        "تكرار الأغنية": ("emoji_40", "music_repeat"),
-        "تكرار الطابور": ("emoji_40", "music_repeat"),
-        "قائمة الانتظار": ("emoji_41", "music_queue"),
-        "رفع الصوت": ("emoji_24", "music_volume"),
-        # No custom lower-volume emoji was confirmed as uploaded, so keep its Unicode icon.
+        "السابق": ("music_previous",),
+        "إيقاف": ("music_stop",),
+        "إيقاف مؤقت": ("music_pause",),
+        "استئناف": ("music_play",),
+        "التالي": ("music_next",),
+        "التكرار متوقف": ("music_repeat",),
+        "تكرار الأغنية": ("music_repeat",),
+        "تكرار الطابور": ("music_repeat",),
+        "قائمة الانتظار": ("music_queue",),
+        "رفع الصوت": ("music_headphones",),
+        "خفض الصوت": ("music_mute",),
     }
     for item in view.children:
         if not isinstance(item, discord.ui.Button):
             continue
-        names = label_names.get(item.label or "", ())
-        for name in names:
-            matches = emojis_by_name.get(name)
-            if matches:
-                item.emoji = matches[0]
+        for emoji_name in label_names.get(item.label or "", ()):
+            emoji = emojis.get(emoji_name)
+            if emoji is not None:
+                item.emoji = emoji
                 break
 
 
@@ -965,14 +961,14 @@ class PlayerView(discord.ui.View):
         if voice_client and voice_client.is_playing():
             voice_client.pause()
             button.emoji = next(
-                (emoji for emoji in interaction.guild.emojis if emoji.name in ("music_play", "emoji_34")),
+                (emoji for emoji in interaction.guild.emojis if emoji.name == "music_play"),
                 "▶️",
             )
             button.label = "استئناف"
         elif voice_client and voice_client.is_paused():
             voice_client.resume()
             button.emoji = next(
-                (emoji for emoji in interaction.guild.emojis if emoji.name in ("music_pause", "emoji_35")),
+                (emoji for emoji in interaction.guild.emojis if emoji.name == "music_pause"),
                 "⏸️",
             )
             button.label = "إيقاف مؤقت"
