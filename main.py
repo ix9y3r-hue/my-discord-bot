@@ -568,7 +568,7 @@ async def find_named_fallback(title: str, *, prefer_soundcloud: bool = False) ->
     if not title:
         return None
 
-    sources = [("soundcloud", f"scsearch1:{title}")] if prefer_soundcloud else [
+    sources = [("soundcloud", f"scsearch5:{title}")] if prefer_soundcloud else [
         ("youtube", f"ytsearch1:{title}"),
         ("soundcloud", f"scsearch3:{title}"),
     ]
