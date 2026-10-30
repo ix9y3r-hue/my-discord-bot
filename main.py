@@ -95,10 +95,8 @@ BASE_YTDL = {
     # Temporary diagnostic mode: reveal whether yt-dlp loads bgutil and requests a PO Token.
     # Turn this off after checking Railway logs to avoid verbose routine logs.
     "verbose": os.getenv("YTDLP_VERBOSE", "").strip() == "1",
-    # Prefer mweb with the bgutil GVS PO-token provider. Keep web_safari as
-    # the in-call alternative; avoid tv when account cookies are present because
-    # yt-dlp documents DRM restrictions for that client with cookies.
-    "extractor_args": {"youtube": {"player_client": ["mweb", "web_safari"]}},
+    # Restore the previous multi-client extraction strategy.
+    "extractor_args": {"youtube": {"player_client": ["mweb", "tv", "web_safari"]}},
     # Let yt-dlp use Deno to solve YouTube JavaScript player challenges.
     "js_runtimes": {"deno": {}},
 }
@@ -163,39 +161,6 @@ ytdl_cookie_stream = (
     yt_dlp.YoutubeDL(COOKIE_YTDL_OPTIONS)
     if COOKIE_YTDL_OPTIONS else None
 )
-# If mweb's GoogleVideo stream is rejected, retry the same video with
-# web_safari, preferring HLS formats that currently avoid GVS PO-token checks.
-YOUTUBE_FALLBACK_CLIENTS = ("web_safari",)
-# Keep alternate extractors lazy: most requests succeed with the primary client,
-# so do not allocate extra YoutubeDL instances until a fallback is actually needed.
-ytdl_search_fallbacks: dict[str, yt_dlp.YoutubeDL] = {}
-ytdl_stream_fallbacks: dict[str, yt_dlp.YoutubeDL] = {}
-
-
-def get_fallback_ytdl(
-    client: str, *, flat: bool = False, use_cookies: bool = False
-) -> yt_dlp.YoutubeDL:
-    cache = ytdl_search_fallbacks if flat else ytdl_stream_fallbacks
-    if client not in YOUTUBE_FALLBACK_CLIENTS:
-        raise ValueError("Unsupported YouTube fallback client")
-    if use_cookies and not YOUTUBE_COOKIE_FILE:
-        raise ValueError("YouTube cookies are unavailable for the alternate-client retry")
-    cache_key = f"{client}:cookies" if use_cookies else client
-    if cache_key not in cache:
-        options = {
-            **BASE_YTDL,
-            "extractor_args": {"youtube": {"player_client": [client]}},
-        }
-        if use_cookies:
-            options["cookiefile"] = YOUTUBE_COOKIE_FILE
-        if client == "web_safari":
-            options["format"] = "bestaudio[protocol^=m3u8]/bestaudio/best"
-        if flat:
-            options["extract_flat"] = "in_playlist"
-        cache[cache_key] = yt_dlp.YoutubeDL(options)
-    return cache[cache_key]
-
-
 ytdl_lock = asyncio.Lock()
 
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
@@ -591,21 +556,6 @@ def normalize_youtube_error(error: BaseException | str) -> str:
     }))
 
 
-def next_youtube_fallback_client(track: Track) -> str | None:
-    """Return the next one-time alternate client for this exact YouTube video."""
-    if not is_youtube_query(track.get("webpage", "")):
-        return None
-    try:
-        attempts = int(track.get("youtube_retry_attempts", "0"))
-    except (TypeError, ValueError):
-        attempts = 0
-    if attempts >= len(YOUTUBE_FALLBACK_CLIENTS):
-        return None
-    client = YOUTUBE_FALLBACK_CLIENTS[attempts]
-    track["youtube_retry_attempts"] = str(attempts + 1)
-    track["youtube_client"] = client
-    return client
-
 
 async def extract_info(
     query: str, *, flat: bool = False, use_youtube_cookies: bool = False
@@ -665,53 +615,6 @@ async def extract_info(
                 extraction_error,
             )
             raise
-
-async def extract_youtube_info_with_client(
-    query: str, client: str
-) -> dict[str, Any] | None:
-    """Extract the same YouTube video with an alternate client, retrying bot-check with cookies."""
-    ydl = get_fallback_ytdl(client, flat=False)
-    async with ytdl_lock:
-        try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(ydl.extract_info, query, download=False),
-                timeout=EXTRACT_TIMEOUT,
-            )
-        except Exception as extraction_error:
-            error_text = normalize_youtube_error(extraction_error)
-            bot_check_block = (
-                "sign in to confirm you're not a bot" in error_text
-                or "confirm you're not a bot" in error_text
-            )
-            if not bot_check_block:
-                raise
-            if not YOUTUBE_COOKIE_FILE:
-                logger.error(
-                    "YouTube bot-check on alternate client %s; no valid cookies are available",
-                    client,
-                )
-                raise
-            logger.warning(
-                "YouTube bot-check on alternate client %s; retrying the same URL once with cookies",
-                client,
-            )
-            cookie_ydl = get_fallback_ytdl(
-                client, flat=False, use_cookies=True
-            )
-            try:
-                return await asyncio.wait_for(
-                    asyncio.to_thread(
-                        cookie_ydl.extract_info, query, download=False
-                    ),
-                    timeout=EXTRACT_TIMEOUT,
-                )
-            except Exception as cookie_error:
-                logger.error(
-                    "Cookie-authenticated alternate-client retry failed for %s: %s",
-                    client,
-                    cookie_error,
-                )
-                raise cookie_error from extraction_error
 
 
 def build_queries(search: str) -> list[str]:
@@ -1349,16 +1252,10 @@ async def play_next(guild: discord.Guild) -> None:
             track, requester_channel = queue.pop(0)
             stream: dict[str, Any] | None = None
             try:
-                selected_client = track.get("youtube_client")
-                if selected_client and is_youtube_query(track.get("webpage", "")):
-                    stream = await extract_youtube_info_with_client(
-                        track["webpage"], selected_client
-                    )
-                else:
-                    stream = await extract_info(
-                        track["webpage"],
-                        use_youtube_cookies=track.get("requested_direct_youtube") == "true",
-                    )
+                stream = await extract_info(
+                    track["webpage"],
+                    use_youtube_cookies=track.get("requested_direct_youtube") == "true",
+                )
                 if not stream or not stream.get("url"):
                     raise ValueError("لم أتمكن من الحصول على رابط البث.")
                 source = build_ffmpeg_source(
@@ -1416,23 +1313,9 @@ async def play_next(guild: discord.Guild) -> None:
                 if now_playing.get(guild.id) is track:
                     now_playing.pop(guild.id, None)
                 error_text = normalize_youtube_error(playback_error)
-                # Retry the exact YouTube video once with web_safari before giving up.
-                # One SoundCloud title lookup below is cheaper and avoids request loops.
+                # Keep the original single fallback path; do not retry the same video
+                # through a separate HLS/web_safari extractor.
                 failed_url = track.get("webpage", "")
-                retry_client = next_youtube_fallback_client(track)
-                if retry_client:
-                    logger.warning(
-                        "YouTube playback failed for %s; retrying the same video with %s",
-                        track.get("title", "unknown track"),
-                        retry_client,
-                    )
-                    queues.setdefault(guild.id, []).insert(0, (track, requester_channel))
-                    await send_safely(
-                        requester_channel,
-                        "تعذر تشغيل بث يوتيوب بالطريقة الأولى؛ أعيد المحاولة على نفس الفيديو بطريقة بديلة.",
-                    )
-                    continue
-
                 fallback_stage = track.get("fallback_stage")
                 try:
                     excluded_urls = set(json.loads(track.get("fallback_excluded", "[]")))
@@ -1511,49 +1394,34 @@ async def advance_after_track(
     requester_channel: discord.abc.Messageable,
     finished_ok: bool,
 ) -> None:
-    # A failed GoogleVideo stream gets one same-video web_safari/HLS retry
-    # before the existing non-YouTube fallback path is allowed to run.
+    # Restore the original post-failure behavior without a same-video HLS retry.
     if (
         not finished_ok
         and guild.id not in skipped_guilds
         and is_youtube_query(finished_track.get("webpage", ""))
+        and not finished_track.get("youtube_only")
+        and finished_track.get("fallback_stage") != "soundcloud"
     ):
-        retry_client = next_youtube_fallback_client(finished_track)
-        if retry_client:
-            logger.warning(
-                "YouTube stream failed for %s; retrying the same video with %s",
-                finished_track.get("title", "unknown track"),
-                retry_client,
+        fallback = None
+        try:
+            fallback = await find_named_fallback(
+                finished_track.get("title", ""),
+                prefer_soundcloud=True,
             )
-            queues.setdefault(guild.id, []).insert(0, (finished_track, requester_channel))
+        except Exception:
+            logger.exception("SoundCloud fallback search failed after playback error")
+        if fallback:
+            fallback["requester"] = finished_track.get("requester", "")
+            queues.setdefault(guild.id, []).insert(0, (fallback, requester_channel))
             await send_safely(
                 requester_channel,
-                "رفض يوتيوب بث الصوت؛ أعيد المحاولة على نفس الفيديو باستخدام اتصال بديل.",
+                "تعذر تشغيل الأغنية من يوتيوب؛ أبحث عن نسخة في ساوند كلاود وأجربها مرة واحدة.",
             )
-        elif (
-            not finished_track.get("youtube_only")
-            and finished_track.get("fallback_stage") != "soundcloud"
-        ):
-            fallback = None
-            try:
-                fallback = await find_named_fallback(
-                    finished_track.get("title", ""),
-                    prefer_soundcloud=True,
-                )
-            except Exception:
-                logger.exception("SoundCloud fallback search failed after playback error")
-            if fallback:
-                fallback["requester"] = finished_track.get("requester", "")
-                queues.setdefault(guild.id, []).insert(0, (fallback, requester_channel))
-                await send_safely(
-                    requester_channel,
-                    "تعذر تشغيل الأغنية من يوتيوب؛ أبحث عن نسخة في ساوند كلاود وأجربها مرة واحدة.",
-                )
-            else:
-                await send_safely(
-                    requester_channel,
-                    "تعذر تشغيل الأغنية من يوتيوب ولم أجد نسخة مناسبة في ساوند كلاود. سأنتقل للأغنية التالية.",
-                )
+        else:
+            await send_safely(
+                requester_channel,
+                "تعذر تشغيل الأغنية من يوتيوب ولم أجد نسخة مناسبة في ساوند كلاود. سأنتقل للأغنية التالية.",
+            )
 
     if now_playing.get(guild.id) is finished_track:
         now_playing.pop(guild.id, None)
