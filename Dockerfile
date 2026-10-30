@@ -25,7 +25,8 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
-COPY main.py temp_voice.py patch_main.py ./
+# Include the automatic join sound with the Python source files.
+COPY main.py temp_voice.py patch_main.py join_sound.mp3 ./
 RUN python patch_main.py && python -m py_compile main.py temp_voice.py
 
 EXPOSE 8080
