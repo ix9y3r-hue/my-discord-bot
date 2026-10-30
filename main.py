@@ -185,8 +185,6 @@ ytdl_lock = asyncio.Lock()
 
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 FFMPEG_OPTIONS_AFTER = "-vn"
-INTRO_SOUND_FILE = os.getenv("INTRO_SOUND_FILE", "join_sound.mp3")
-intro_guilds: set[int] = set()
 
 queues: dict[int, list[tuple[Track, discord.abc.Messageable]]] = {}
 now_playing: dict[int, Track] = {}
@@ -1197,11 +1195,6 @@ async def play_next(guild: discord.Guild) -> None:
         voice_client = guild.voice_client
         if not voice_client or not voice_client.is_connected():
             return
-        # A requested song always takes priority over the short join sound.
-        if guild.id in intro_guilds:
-            intro_guilds.discard(guild.id)
-            if voice_client.is_playing() or voice_client.is_paused():
-                voice_client.stop()
         if voice_client.is_playing() or voice_client.is_paused():
             return
         queue = queues.setdefault(guild.id, [])
@@ -1387,39 +1380,6 @@ def user_shares_bot_voice_channel(ctx: commands.Context) -> bool:
     )
 
 
-def stop_join_sound(guild: discord.Guild, voice_client: discord.VoiceClient) -> None:
-    """Stop the automatic join sound without affecting normal music playback."""
-    if guild.id in intro_guilds:
-        intro_guilds.discard(guild.id)
-        if voice_client.is_playing() or voice_client.is_paused():
-            voice_client.stop()
-
-
-def start_join_sound(guild: discord.Guild, voice_client: discord.VoiceClient) -> None:
-    """Play the local MP3 once after joining, only when no requested music is waiting."""
-    if not os.path.isfile(INTRO_SOUND_FILE):
-        logger.warning("Join sound file is missing: %s", INTRO_SOUND_FILE)
-        return
-    if queues.get(guild.id) or now_playing.get(guild.id):
-        return
-    if voice_client.is_playing() or voice_client.is_paused():
-        return
-    try:
-        source = discord.FFmpegPCMAudio(INTRO_SOUND_FILE, options="-vn")
-        intro_guilds.add(guild.id)
-        loop = bot.loop
-
-        def after_intro(error: Exception | None) -> None:
-            if error:
-                logger.warning("Join sound playback failed: %s", error)
-            loop.call_soon_threadsafe(intro_guilds.discard, guild.id)
-
-        voice_client.play(source, after=after_intro)
-    except (OSError, discord.DiscordException):
-        intro_guilds.discard(guild.id)
-        logger.exception("Could not play the automatic join sound")
-
-
 async def connect_voice(
     guild: discord.Guild, channel: discord.VoiceChannel | discord.StageChannel
 ) -> discord.VoiceClient:
@@ -1445,8 +1405,6 @@ async def connect_voice(
                 channel.id,
             )
             raise
-    if entered_or_moved:
-        start_join_sound(guild, voice_client)
     return voice_client
 
 
@@ -2200,8 +2158,6 @@ async def play_song(ctx: commands.Context, *, search: str | None = None) -> None
         logger.exception("Could not join the voice channel")
         await ctx.send("تعذر دخول الروم الصوتي.")
         return
-    # A song request interrupts the automatic join sound immediately, before search/extraction.
-    stop_join_sound(ctx.guild, voice_client)
     await ctx.send(f"أبحث عن **{search}**...")
     try:
         if soundcloud_only:
