@@ -148,6 +148,11 @@ COOKIE_YTDL_OPTIONS = (
     {**BASE_YTDL, "cookiefile": YOUTUBE_COOKIE_FILE}
     if YOUTUBE_COOKIE_FILE else None
 )
+# Report only whether a cookie file was loaded; never log its contents or values.
+if YOUTUBE_COOKIE_FILE:
+    logger.info("YouTube cookies loaded from environment; cookie contents are hidden")
+else:
+    logger.warning("YOUTUBE_COOKIES is empty or invalid; same-video cookie retry is unavailable")
 ytdl_search = yt_dlp.YoutubeDL({**BASE_YTDL, "extract_flat": "in_playlist"})
 ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
 ytdl_cookie_search = (
@@ -584,7 +589,16 @@ async def extract_info(
                 timeout=EXTRACT_TIMEOUT,
             )
         except Exception as extraction_error:
-            error_text = str(extraction_error).lower()
+            # YouTube's message may use a typographic apostrophe (’), while
+            # ordinary string matching below expects an ASCII apostrophe (').
+            # Normalize both forms so the one-time cookie retry is not skipped.
+            error_text = (
+                str(extraction_error)
+                .casefold()
+                .replace("\\u2019", "'")
+                .replace("\\u2018", "'")
+                .replace("\\uff07", "'")
+            )
             exact_youtube_video = (
                 not flat
                 and query.startswith(("http://", "https://"))
