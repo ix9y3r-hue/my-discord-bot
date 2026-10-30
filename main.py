@@ -95,7 +95,9 @@ BASE_YTDL = {
     # Temporary diagnostic mode: reveal whether yt-dlp loads bgutil and requests a PO Token.
     # Turn this off after checking Railway logs to avoid verbose routine logs.
     "verbose": os.getenv("YTDLP_VERBOSE", "").strip() == "1",
-    # Restore the previous multi-client extraction strategy.
+    # Official bgutil guidance: if a client fails before requesting a PO Token,
+    # let yt-dlp try these supported clients within the same extraction call.
+    # This is not an external retry loop and does not enable cookies.
     "extractor_args": {"youtube": {"player_client": ["mweb", "tv", "web_safari"]}},
     # Let yt-dlp use Deno to solve YouTube JavaScript player challenges.
     "js_runtimes": {"deno": {}},
@@ -146,11 +148,6 @@ COOKIE_YTDL_OPTIONS = (
     {**BASE_YTDL, "cookiefile": YOUTUBE_COOKIE_FILE}
     if YOUTUBE_COOKIE_FILE else None
 )
-# Report only whether a cookie file was loaded; never log its contents or values.
-if YOUTUBE_COOKIE_FILE:
-    logger.info("YouTube cookies loaded from environment; cookie contents are hidden")
-else:
-    logger.warning("YOUTUBE_COOKIES is empty or invalid; same-video cookie retry is unavailable")
 ytdl_search = yt_dlp.YoutubeDL({**BASE_YTDL, "extract_flat": "in_playlist"})
 ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
 ytdl_cookie_search = (
@@ -161,6 +158,29 @@ ytdl_cookie_stream = (
     yt_dlp.YoutubeDL(COOKIE_YTDL_OPTIONS)
     if COOKIE_YTDL_OPTIONS else None
 )
+# Use the documented mweb + PO-token setup; do not rotate through clients on each failure.
+YOUTUBE_FALLBACK_CLIENTS = ("mweb",)
+# Keep alternate extractors lazy: most requests succeed with the primary client,
+# so do not allocate extra YoutubeDL instances until a fallback is actually needed.
+ytdl_search_fallbacks: dict[str, yt_dlp.YoutubeDL] = {}
+ytdl_stream_fallbacks: dict[str, yt_dlp.YoutubeDL] = {}
+
+
+def get_fallback_ytdl(client: str, *, flat: bool = False) -> yt_dlp.YoutubeDL:
+    cache = ytdl_search_fallbacks if flat else ytdl_stream_fallbacks
+    if client not in YOUTUBE_FALLBACK_CLIENTS:
+        raise ValueError("Unsupported YouTube fallback client")
+    if client not in cache:
+        options = {
+            **BASE_YTDL,
+            "extractor_args": {"youtube": {"player_client": [client]}},
+        }
+        if flat:
+            options["extract_flat"] = "in_playlist"
+        cache[client] = yt_dlp.YoutubeDL(options)
+    return cache[client]
+
+
 ytdl_lock = asyncio.Lock()
 
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
@@ -546,17 +566,6 @@ def is_youtube_query(query: str) -> bool:
     )
 
 
-def normalize_youtube_error(error: BaseException | str) -> str:
-    """Normalize typographic apostrophes used in YouTube's bot-check messages."""
-    return str(error).casefold().translate(str.maketrans({
-        "\u2018": "'",
-        "\u2019": "'",
-        "\uff07": "'",
-        "\u02bc": "'",
-    }))
-
-
-
 async def extract_info(
     query: str, *, flat: bool = False, use_youtube_cookies: bool = False
 ) -> dict[str, Any] | None:
@@ -575,46 +584,22 @@ async def extract_info(
                 timeout=EXTRACT_TIMEOUT,
             )
         except Exception as extraction_error:
-            # YouTube may use typographic apostrophes (for example, “you’re”).
-            # Normalize the actual Unicode characters before matching the bot-check.
-            error_text = normalize_youtube_error(extraction_error)
-            exact_youtube_video = (
-                not flat
-                and query.startswith(("http://", "https://"))
-                and is_youtube_query(query)
-            )
-            bot_check_block = (
-                "sign in to confirm you're not a bot" in error_text
-                or "confirm you're not a bot" in error_text
-            )
-            # A title search stays cookie-free. Only retry the exact resolved video URL,
-            # once, when YouTube explicitly blocks extraction with its bot-check.
-            if exact_youtube_video and bot_check_block and not use_cookies:
-                if cookie_ydl is not None:
-                    logger.warning(
-                        "YouTube bot-check on a resolved video; retrying the same URL once with configured cookies"
-                    )
-                    try:
-                        return await asyncio.wait_for(
-                            asyncio.to_thread(
-                                cookie_ydl.extract_info, query, download=False
-                            ),
-                            timeout=EXTRACT_TIMEOUT,
-                        )
-                    except Exception as cookie_error:
-                        logger.warning(
-                            "Cookie-authenticated retry failed for the same YouTube video: %s",
-                            cookie_error,
-                        )
-                        raise cookie_error from extraction_error
-                logger.warning(
-                    "YouTube bot-check retry skipped: no valid YOUTUBE_COOKIES file is configured"
-                )
             logger.warning(
                 "Media extraction failed; handing off to the single fallback path: %s",
                 extraction_error,
             )
             raise
+
+async def extract_youtube_info_with_client(
+    query: str, client: str
+) -> dict[str, Any] | None:
+    """Extract a fresh stream using one explicit alternate YouTube player client."""
+    ydl = get_fallback_ytdl(client, flat=False)
+    async with ytdl_lock:
+        return await asyncio.wait_for(
+            asyncio.to_thread(ydl.extract_info, query, download=False),
+            timeout=EXTRACT_TIMEOUT,
+        )
 
 
 def build_queries(search: str) -> list[str]:
@@ -646,21 +631,15 @@ async def youtube_title_from_oembed(url: str) -> str | None:
 
 
 
-async def find_named_fallback(
-    title: str,
-    *,
-    prefer_soundcloud: bool = False,
-    exclude_urls: set[str] | None = None,
-) -> Track | None:
-    """Find an alternate result by title, skipping URLs that already failed."""
+async def find_named_fallback(title: str, *, prefer_soundcloud: bool = False) -> Track | None:
+    """Search by title on YouTube first, then SoundCloud; never log cookie contents."""
     title = title.strip()
     if not title:
         return None
 
-    excluded = exclude_urls or set()
-    sources = [("soundcloud", f"scsearch10:{title}")] if prefer_soundcloud else [
-        ("youtube", f"ytsearch3:{title}"),
-        ("soundcloud", f"scsearch10:{title}"),
+    sources = [("soundcloud", f"scsearch5:{title}")] if prefer_soundcloud else [
+        ("youtube", f"ytsearch1:{title}"),
+        ("soundcloud", f"scsearch3:{title}"),
     ]
     for source_name, query in sources:
         try:
@@ -682,8 +661,6 @@ async def find_named_fallback(
                 webpage = f"https://www.youtube.com/watch?v={video_id}"
             if not isinstance(webpage, str) or not webpage.startswith(("http://", "https://")):
                 continue
-            if webpage in excluded:
-                continue
             return {
                 "title": str(entry.get("title") or title),
                 "webpage": webpage,
@@ -697,20 +674,12 @@ async def find_track(
     status_channel: discord.abc.Messageable | None = None,
     *,
     soundcloud_only: bool = False,
-    youtube_only: bool = False,
 ) -> Track:
     last_error: Exception | None = None
     direct_youtube_url = search.startswith(("http://", "https://")) and is_youtube_query(search)
 
-    # Explicit source modes never fall through to the other platform.
-    if youtube_only and search.startswith(("http://", "https://")):
-        if not is_youtube_query(search):
-            raise ValueError("أمر ش ي يشغّل يوتيوب فقط. أرسل اسم المقطع أو رابط يوتيوب.")
-        queries = [search]
-    elif youtube_only:
-        queries = [f"ytsearch1:{search}"]
     # "ش س" means SoundCloud-only: never query or inspect YouTube for this request.
-    elif soundcloud_only and search.startswith(("http://", "https://")):
+    if soundcloud_only and search.startswith(("http://", "https://")):
         if "soundcloud.com" not in search.lower():
             raise ValueError("أمر ش س يشغّل ساوند كلاود فقط. أرسل اسم الأغنية أو رابطًا من ساوند كلاود.")
         queries = [search]
@@ -738,15 +707,7 @@ async def find_track(
         track: Track = {"title": data.get("title") or "أغنية بدون اسم", "webpage": webpage}
         if direct_youtube_url:
             track["requested_direct_youtube"] = "true"
-        if youtube_only:
-            track["youtube_only"] = "true"
         return track
-
-    # Explicit YouTube-only requests must never fall through to SoundCloud.
-    if youtube_only:
-        if last_error:
-            logger.error("YouTube-only search failed", exc_info=last_error)
-        raise ValueError("ما حصلت المقطع في يوتيوب. جرّب اسمًا آخر أو تأكد من كتابة العنوان.")
 
     # SoundCloud-only requests must never fall through to YouTube metadata or search.
     if soundcloud_only:
@@ -1252,10 +1213,16 @@ async def play_next(guild: discord.Guild) -> None:
             track, requester_channel = queue.pop(0)
             stream: dict[str, Any] | None = None
             try:
-                stream = await extract_info(
-                    track["webpage"],
-                    use_youtube_cookies=track.get("requested_direct_youtube") == "true",
-                )
+                selected_client = track.get("youtube_client")
+                if selected_client and is_youtube_query(track.get("webpage", "")):
+                    stream = await extract_youtube_info_with_client(
+                        track["webpage"], selected_client
+                    )
+                else:
+                    stream = await extract_info(
+                        track["webpage"],
+                        use_youtube_cookies=track.get("requested_direct_youtube") == "true",
+                    )
                 if not stream or not stream.get("url"):
                     raise ValueError("لم أتمكن من الحصول على رابط البث.")
                 source = build_ffmpeg_source(
@@ -1312,45 +1279,25 @@ async def play_next(guild: discord.Guild) -> None:
                 logger.exception("Could not play track: %s", track["title"])
                 if now_playing.get(guild.id) is track:
                     now_playing.pop(guild.id, None)
-                error_text = normalize_youtube_error(playback_error)
-                # Keep the original single fallback path; do not retry the same video
-                # through a separate HLS/web_safari extractor.
-                failed_url = track.get("webpage", "")
+                error_text = str(playback_error).lower()
+                # Do not retry the same failed YouTube track through several clients.
+                # One SoundCloud title lookup below is cheaper and avoids request loops.
                 fallback_stage = track.get("fallback_stage")
-                try:
-                    excluded_urls = set(json.loads(track.get("fallback_excluded", "[]")))
-                except (TypeError, ValueError):
-                    excluded_urls = set()
-                if failed_url:
-                    excluded_urls.add(failed_url)
-                try:
-                    fallback_attempts = int(track.get("fallback_attempts", "0"))
-                except (TypeError, ValueError):
-                    fallback_attempts = 0
-                # Try up to five distinct SoundCloud results instead of giving up
-                # after the first result has an expired or non-playable stream URL.
-                can_fallback = (
-                    not track.get("youtube_only")
-                    and (fallback_stage != "soundcloud" or fallback_attempts < 4)
-                )
-                if can_fallback:
+                if fallback_stage != "soundcloud":
                     try:
                         fallback = await find_named_fallback(
                             track.get("title", ""),
                             prefer_soundcloud=(
                                 is_youtube_query(track.get("webpage", ""))
                                 or bool(track.get("requested_direct_youtube"))
-                                or fallback_stage in ("youtube", "soundcloud")
+                                or fallback_stage == "youtube"
                             ),
-                            exclude_urls=excluded_urls,
                         )
                     except Exception:
                         logger.exception("Title fallback search failed")
                         fallback = None
                     if fallback:
                         fallback["requester"] = track.get("requester", "")
-                        fallback["fallback_attempts"] = str(fallback_attempts + 1)
-                        fallback["fallback_excluded"] = json.dumps(sorted(excluded_urls), ensure_ascii=False)
                         queues.setdefault(guild.id, []).insert(0, (fallback, requester_channel))
                         if (
                             fallback.get("fallback_stage") == "soundcloud"
@@ -1369,11 +1316,7 @@ async def play_next(guild: discord.Guild) -> None:
                         continue
 
                 if "sign in to confirm you're not a bot" in error_text or "confirm you're not a bot" in error_text:
-                    reason = (
-                        "يوتيوب طلب تحققًا من البوت، ولم أتمكن من تشغيل المقطع ببيانات الدخول المتاحة."
-                        if track.get("youtube_only")
-                        else "يوتيوب طلب تحققًا من البوت، لذلك سأنتقل إلى البحث في ساوند كلاود."
-                    )
+                    reason = "يوتيوب طلب تحققًا من البوت، لذلك سأنتقل إلى البحث في ساوند كلاود."
                 elif "http error 403" in error_text or "status code 403" in error_text:
                     reason = "المصدر رفض رابط البث (403)، وقد يكون الرابط أو عنوان الاستضافة مقيّدًا."
                 elif "requested format is not available" in error_text or "requested format" in error_text:
@@ -1394,12 +1337,12 @@ async def advance_after_track(
     requester_channel: discord.abc.Messageable,
     finished_ok: bool,
 ) -> None:
-    # Restore the original post-failure behavior without a same-video HLS retry.
+    # Never replay a failed YouTube URL or rotate through clients repeatedly.
+    # Do one SoundCloud title search; this avoids duplicate extraction requests.
     if (
         not finished_ok
         and guild.id not in skipped_guilds
         and is_youtube_query(finished_track.get("webpage", ""))
-        and not finished_track.get("youtube_only")
         and finished_track.get("fallback_stage") != "soundcloud"
     ):
         fallback = None
@@ -2219,13 +2162,7 @@ async def play_song(ctx: commands.Context, *, search: str | None = None) -> None
     if not search:
         await ctx.send("اكتب اسم الأغنية بعد الأمر، مثل: `ش اسم الأغنية` أو `ش س اسم الأغنية` للبحث في ساوند كلاود فقط.")
         return
-    youtube_only = search == "ي" or search.startswith("ي ")
     soundcloud_only = search == "س" or search.startswith("س ")
-    if youtube_only:
-        search = search[1:].strip()
-        if not search:
-            await ctx.send("اكتب اسم المقطع بعد `ش ي`، مثال: `ش ي اسم المقطع`")
-            return
     if soundcloud_only:
         search = search[1:].strip()
         if not search:
@@ -2267,15 +2204,12 @@ async def play_song(ctx: commands.Context, *, search: str | None = None) -> None
     stop_join_sound(ctx.guild, voice_client)
     await ctx.send(f"أبحث عن **{search}**...")
     try:
-        if youtube_only:
-            await ctx.send(f"أبحث عن **{search}** في يوتيوب فقط...")
-        elif soundcloud_only:
+        if soundcloud_only:
             await ctx.send(f"أبحث عن **{search}** في ساوند كلاود فقط، بدون البحث في يوتيوب...")
         track = await find_track(
             search,
             status_channel=ctx.channel,
             soundcloud_only=soundcloud_only,
-            youtube_only=youtube_only,
         )
     except ValueError as exc:
         await ctx.send(str(exc))
