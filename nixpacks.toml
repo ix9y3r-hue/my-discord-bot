@@ -1,5 +1,0 @@
-[phases.setup]
-nixPkgs = ["...", "ffmpeg", "deno"]
-
-[phases.build]
-cmds = ["python patch_main.py"]
