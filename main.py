@@ -584,6 +584,39 @@ async def extract_info(
                 timeout=EXTRACT_TIMEOUT,
             )
         except Exception as extraction_error:
+            error_text = str(extraction_error).lower()
+            exact_youtube_video = (
+                not flat
+                and query.startswith(("http://", "https://"))
+                and is_youtube_query(query)
+            )
+            bot_check_block = (
+                "sign in to confirm you're not a bot" in error_text
+                or "confirm you're not a bot" in error_text
+            )
+            # A title search stays cookie-free. Only retry the exact resolved video URL,
+            # once, when YouTube explicitly blocks extraction with its bot-check.
+            if exact_youtube_video and bot_check_block and not use_cookies:
+                if cookie_ydl is not None:
+                    logger.warning(
+                        "YouTube bot-check on a resolved video; retrying the same URL once with configured cookies"
+                    )
+                    try:
+                        return await asyncio.wait_for(
+                            asyncio.to_thread(
+                                cookie_ydl.extract_info, query, download=False
+                            ),
+                            timeout=EXTRACT_TIMEOUT,
+                        )
+                    except Exception as cookie_error:
+                        logger.warning(
+                            "Cookie-authenticated retry failed for the same YouTube video: %s",
+                            cookie_error,
+                        )
+                        raise cookie_error from extraction_error
+                logger.warning(
+                    "YouTube bot-check retry skipped: no valid YOUTUBE_COOKIES file is configured"
+                )
             logger.warning(
                 "Media extraction failed; handing off to the single fallback path: %s",
                 extraction_error,
@@ -723,6 +756,8 @@ async def find_track(
         track: Track = {"title": data.get("title") or "أغنية بدون اسم", "webpage": webpage}
         if direct_youtube_url:
             track["requested_direct_youtube"] = "true"
+        if youtube_only:
+            track["youtube_only"] = "true"
         return track
 
     # Explicit YouTube-only requests must never fall through to SoundCloud.
@@ -1318,7 +1353,10 @@ async def play_next(guild: discord.Guild) -> None:
                     fallback_attempts = 0
                 # Try up to five distinct SoundCloud results instead of giving up
                 # after the first result has an expired or non-playable stream URL.
-                can_fallback = fallback_stage != "soundcloud" or fallback_attempts < 4
+                can_fallback = (
+                    not track.get("youtube_only")
+                    and (fallback_stage != "soundcloud" or fallback_attempts < 4)
+                )
                 if can_fallback:
                     try:
                         fallback = await find_named_fallback(
@@ -1355,7 +1393,11 @@ async def play_next(guild: discord.Guild) -> None:
                         continue
 
                 if "sign in to confirm you're not a bot" in error_text or "confirm you're not a bot" in error_text:
-                    reason = "يوتيوب طلب تحققًا من البوت، لذلك سأنتقل إلى البحث في ساوند كلاود."
+                    reason = (
+                        "يوتيوب طلب تحققًا من البوت، ولم أتمكن من تشغيل المقطع ببيانات الدخول المتاحة."
+                        if track.get("youtube_only")
+                        else "يوتيوب طلب تحققًا من البوت، لذلك سأنتقل إلى البحث في ساوند كلاود."
+                    )
                 elif "http error 403" in error_text or "status code 403" in error_text:
                     reason = "المصدر رفض رابط البث (403)، وقد يكون الرابط أو عنوان الاستضافة مقيّدًا."
                 elif "requested format is not available" in error_text or "requested format" in error_text:
@@ -1382,6 +1424,7 @@ async def advance_after_track(
         not finished_ok
         and guild.id not in skipped_guilds
         and is_youtube_query(finished_track.get("webpage", ""))
+        and not finished_track.get("youtube_only")
         and finished_track.get("fallback_stage") != "soundcloud"
     ):
         fallback = None
