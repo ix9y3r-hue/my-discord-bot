@@ -103,31 +103,61 @@ BASE_YTDL = {
     "js_runtimes": {"deno": {}},
 }
 # --- Optional YouTube access settings -------------------------------------
-# Nothing here is active unless you add the variable in Railway > Variables.
-# YT_PROXY        : address of a proxy, e.g. http://user:pass@host:port
-# YT_COOKIES_B64  : your cookies.txt content encoded as base64 (never logged)
+# YOUTUBE_COOKIES accepts raw Netscape cookies.txt contents from Railway.
+# YT_COOKIES_B64 remains supported for backwards compatibility.
 _yt_proxy = os.getenv("YT_PROXY", "").strip()
 if _yt_proxy:
     BASE_YTDL["proxy"] = _yt_proxy
     BASE_YTDL.pop("source_address", None)
-_yt_cookies_b64 = os.getenv("YT_COOKIES_B64", "").strip()
-if _yt_cookies_b64:
-    try:
-        _cookie_path = os.path.join(DATA_DIR, "yt_cookies.txt")
-        with open(_cookie_path, "wb") as _cookie_file:
-            _cookie_file.write(base64.b64decode(_yt_cookies_b64))
+
+YOUTUBE_COOKIE_FILE: str | None = None
+_raw_youtube_cookies = os.getenv("YOUTUBE_COOKIES", "")
+_legacy_youtube_cookies_b64 = os.getenv("YT_COOKIES_B64", "").strip()
+try:
+    _cookie_bytes: bytes | None = None
+    if _raw_youtube_cookies.strip():
+        _cookie_bytes = _raw_youtube_cookies.encode("utf-8")
+    elif _legacy_youtube_cookies_b64:
+        _cookie_bytes = base64.b64decode(_legacy_youtube_cookies_b64, validate=True)
+
+    if _cookie_bytes:
+        _cookie_text = _cookie_bytes.decode("utf-8-sig")
+        _cookie_rows = [
+            row for row in _cookie_text.splitlines()
+            if row.strip() and not row.lstrip().startswith("#")
+        ]
+        if not _cookie_rows or not any("\t" in row for row in _cookie_rows):
+            raise ValueError("Cookie file is not in Netscape cookies.txt format")
+
+        os.makedirs(DATA_DIR, exist_ok=True)
+        YOUTUBE_COOKIE_FILE = os.path.join(DATA_DIR, "yt_cookies.txt")
+        with open(YOUTUBE_COOKIE_FILE, "wb") as _cookie_file:
+            _cookie_file.write(_cookie_bytes)
         try:
-            os.chmod(_cookie_path, 0o600)
+            os.chmod(YOUTUBE_COOKIE_FILE, 0o600)
         except OSError:
             pass
-        BASE_YTDL["cookiefile"] = _cookie_path
-    except Exception:
-        logging.getLogger("discord_music_bot").warning(
-            "YT_COOKIES_B64 is set but could not be decoded; continuing without cookies"
-        )
+except Exception:
+    YOUTUBE_COOKIE_FILE = None
+    logging.getLogger("discord_music_bot").warning(
+        "YouTube cookies could not be loaded; continuing without cookies"
+    )
 
+# Cookies are isolated to direct YouTube links; title searches remain cookie-free.
+COOKIE_YTDL_OPTIONS = (
+    {**BASE_YTDL, "cookiefile": YOUTUBE_COOKIE_FILE}
+    if YOUTUBE_COOKIE_FILE else None
+)
 ytdl_search = yt_dlp.YoutubeDL({**BASE_YTDL, "extract_flat": "in_playlist"})
 ytdl_stream = yt_dlp.YoutubeDL(BASE_YTDL)
+ytdl_cookie_search = (
+    yt_dlp.YoutubeDL({**COOKIE_YTDL_OPTIONS, "extract_flat": "in_playlist"})
+    if COOKIE_YTDL_OPTIONS else None
+)
+ytdl_cookie_stream = (
+    yt_dlp.YoutubeDL(COOKIE_YTDL_OPTIONS)
+    if COOKIE_YTDL_OPTIONS else None
+)
 # Use the documented mweb + PO-token setup; do not rotate through clients on each failure.
 YOUTUBE_FALLBACK_CLIENTS = ("mweb",)
 # Keep alternate extractors lazy: most requests succeed with the primary client,
@@ -536,8 +566,17 @@ def is_youtube_query(query: str) -> bool:
     )
 
 
-async def extract_info(query: str, *, flat: bool = False) -> dict[str, Any] | None:
-    default_ydl = ytdl_search if flat else ytdl_stream
+async def extract_info(
+    query: str, *, flat: bool = False, use_youtube_cookies: bool = False
+) -> dict[str, Any] | None:
+    use_cookies = use_youtube_cookies and is_youtube_query(query)
+    cookie_ydl = ytdl_cookie_search if flat else ytdl_cookie_stream
+    default_ydl = (
+        cookie_ydl if use_cookies and cookie_ydl is not None
+        else (ytdl_search if flat else ytdl_stream)
+    )
+    if use_cookies and cookie_ydl is None:
+        logger.warning("Direct YouTube request requested cookies, but no valid cookie file is configured")
     async with ytdl_lock:
         try:
             return await asyncio.wait_for(
@@ -651,7 +690,9 @@ async def find_track(
 
     for query in queries:
         try:
-            data = await extract_info(query, flat=True)
+            data = await extract_info(
+                query, flat=True, use_youtube_cookies=direct_youtube_url
+            )
         except Exception as exc:
             last_error = exc
             logger.warning("Search failed for %s: %s", query, exc)
@@ -1178,7 +1219,10 @@ async def play_next(guild: discord.Guild) -> None:
                         track["webpage"], selected_client
                     )
                 else:
-                    stream = await extract_info(track["webpage"])
+                    stream = await extract_info(
+                        track["webpage"],
+                        use_youtube_cookies=track.get("requested_direct_youtube") == "true",
+                    )
                 if not stream or not stream.get("url"):
                     raise ValueError("لم أتمكن من الحصول على رابط البث.")
                 source = build_ffmpeg_source(
