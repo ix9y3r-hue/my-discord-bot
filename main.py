@@ -631,15 +631,21 @@ async def youtube_title_from_oembed(url: str) -> str | None:
 
 
 
-async def find_named_fallback(title: str, *, prefer_soundcloud: bool = False) -> Track | None:
-    """Search by title on YouTube first, then SoundCloud; never log cookie contents."""
+async def find_named_fallback(
+    title: str,
+    *,
+    prefer_soundcloud: bool = False,
+    exclude_urls: set[str] | None = None,
+) -> Track | None:
+    """Find an alternate result by title, skipping URLs that already failed."""
     title = title.strip()
     if not title:
         return None
 
-    sources = [("soundcloud", f"scsearch5:{title}")] if prefer_soundcloud else [
-        ("youtube", f"ytsearch1:{title}"),
-        ("soundcloud", f"scsearch3:{title}"),
+    excluded = exclude_urls or set()
+    sources = [("soundcloud", f"scsearch10:{title}")] if prefer_soundcloud else [
+        ("youtube", f"ytsearch3:{title}"),
+        ("soundcloud", f"scsearch10:{title}"),
     ]
     for source_name, query in sources:
         try:
@@ -660,6 +666,8 @@ async def find_named_fallback(title: str, *, prefer_soundcloud: bool = False) ->
             ):
                 webpage = f"https://www.youtube.com/watch?v={video_id}"
             if not isinstance(webpage, str) or not webpage.startswith(("http://", "https://")):
+                continue
+            if webpage in excluded:
                 continue
             return {
                 "title": str(entry.get("title") or title),
@@ -1297,21 +1305,38 @@ async def play_next(guild: discord.Guild) -> None:
                 # Do not retry the same failed YouTube track through several clients.
                 # One SoundCloud title lookup below is cheaper and avoids request loops.
                 fallback_stage = track.get("fallback_stage")
-                if fallback_stage != "soundcloud":
+                try:
+                    excluded_urls = set(json.loads(track.get("fallback_excluded", "[]")))
+                except (TypeError, ValueError):
+                    excluded_urls = set()
+                failed_url = track.get("webpage", "")
+                if failed_url:
+                    excluded_urls.add(failed_url)
+                try:
+                    fallback_attempts = int(track.get("fallback_attempts", "0"))
+                except (TypeError, ValueError):
+                    fallback_attempts = 0
+                # Try up to five distinct SoundCloud results instead of giving up
+                # after the first result has an expired or non-playable stream URL.
+                can_fallback = fallback_stage != "soundcloud" or fallback_attempts < 4
+                if can_fallback:
                     try:
                         fallback = await find_named_fallback(
                             track.get("title", ""),
                             prefer_soundcloud=(
                                 is_youtube_query(track.get("webpage", ""))
                                 or bool(track.get("requested_direct_youtube"))
-                                or fallback_stage == "youtube"
+                                or fallback_stage in ("youtube", "soundcloud")
                             ),
+                            exclude_urls=excluded_urls,
                         )
                     except Exception:
                         logger.exception("Title fallback search failed")
                         fallback = None
                     if fallback:
                         fallback["requester"] = track.get("requester", "")
+                        fallback["fallback_attempts"] = str(fallback_attempts + 1)
+                        fallback["fallback_excluded"] = json.dumps(sorted(excluded_urls), ensure_ascii=False)
                         queues.setdefault(guild.id, []).insert(0, (fallback, requester_channel))
                         if (
                             fallback.get("fallback_stage") == "soundcloud"
