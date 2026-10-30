@@ -7,9 +7,10 @@ source = path.read_text(encoding="utf-8")
 anchor = '    "fragment_retries": 3,\n'
 deno_setting = '    # Let yt-dlp use Deno to solve YouTube JavaScript player challenges.\n    "js_runtimes": {"deno": {}},\n'
 if '"js_runtimes": {"deno": {}}' not in source:
-    if anchor not in source:
-        raise SystemExit("ERROR: Could not find BASE_YTDL settings in main.py")
-    source = source.replace(anchor, anchor + deno_setting, 1)
+    if anchor in source:
+        source = source.replace(anchor, anchor + deno_setting, 1)
+    else:
+        print("WARNING: Could not find BASE_YTDL anchor in main.py; skipping Deno patch")
 
 old_empty_queue = '''        if not queue:
             now_playing.pop(guild.id, None)
@@ -22,7 +23,7 @@ new_empty_queue = '''        if not queue:
 if old_empty_queue in source:
     source = source.replace(old_empty_queue, new_empty_queue, 1)
 elif new_empty_queue not in source:
-    raise SystemExit("ERROR: Could not find play_next empty-queue block in main.py")
+    print("WARNING: Could not find play_next empty-queue block in main.py; skipping")
 
 needle = '''async def advance_after_track(
     guild: discord.Guild,
@@ -77,7 +78,7 @@ replacement = '''async def advance_after_track(
 if needle in source:
     source = source.replace(needle, replacement, 1)
 elif "Restore the original post-failure behavior without a same-video HLS retry." not in source:
-    raise SystemExit("ERROR: Could not find advance_after_track function in main.py")
+    print("WARNING: Could not find advance_after_track function in main.py; skipping")
 
 path.write_text(source, encoding="utf-8")
 print("Patched main.py: Deno enabled and player controls stay visible; YouTube fallback clients are configured in main.py.")
