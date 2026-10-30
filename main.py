@@ -172,21 +172,28 @@ ytdl_search_fallbacks: dict[str, yt_dlp.YoutubeDL] = {}
 ytdl_stream_fallbacks: dict[str, yt_dlp.YoutubeDL] = {}
 
 
-def get_fallback_ytdl(client: str, *, flat: bool = False) -> yt_dlp.YoutubeDL:
+def get_fallback_ytdl(
+    client: str, *, flat: bool = False, use_cookies: bool = False
+) -> yt_dlp.YoutubeDL:
     cache = ytdl_search_fallbacks if flat else ytdl_stream_fallbacks
     if client not in YOUTUBE_FALLBACK_CLIENTS:
         raise ValueError("Unsupported YouTube fallback client")
-    if client not in cache:
+    if use_cookies and not YOUTUBE_COOKIE_FILE:
+        raise ValueError("YouTube cookies are unavailable for the alternate-client retry")
+    cache_key = f"{client}:cookies" if use_cookies else client
+    if cache_key not in cache:
         options = {
             **BASE_YTDL,
             "extractor_args": {"youtube": {"player_client": [client]}},
         }
+        if use_cookies:
+            options["cookiefile"] = YOUTUBE_COOKIE_FILE
         if client == "web_safari":
             options["format"] = "bestaudio[protocol^=m3u8]/bestaudio/best"
         if flat:
             options["extract_flat"] = "in_playlist"
-        cache[client] = yt_dlp.YoutubeDL(options)
-    return cache[client]
+        cache[cache_key] = yt_dlp.YoutubeDL(options)
+    return cache[cache_key]
 
 
 ytdl_lock = asyncio.Lock()
@@ -662,13 +669,49 @@ async def extract_info(
 async def extract_youtube_info_with_client(
     query: str, client: str
 ) -> dict[str, Any] | None:
-    """Extract a fresh stream using one explicit alternate YouTube player client."""
+    """Extract the same YouTube video with an alternate client, retrying bot-check with cookies."""
     ydl = get_fallback_ytdl(client, flat=False)
     async with ytdl_lock:
-        return await asyncio.wait_for(
-            asyncio.to_thread(ydl.extract_info, query, download=False),
-            timeout=EXTRACT_TIMEOUT,
-        )
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(ydl.extract_info, query, download=False),
+                timeout=EXTRACT_TIMEOUT,
+            )
+        except Exception as extraction_error:
+            error_text = normalize_youtube_error(extraction_error)
+            bot_check_block = (
+                "sign in to confirm you're not a bot" in error_text
+                or "confirm you're not a bot" in error_text
+            )
+            if not bot_check_block:
+                raise
+            if not YOUTUBE_COOKIE_FILE:
+                logger.error(
+                    "YouTube bot-check on alternate client %s; no valid cookies are available",
+                    client,
+                )
+                raise
+            logger.warning(
+                "YouTube bot-check on alternate client %s; retrying the same URL once with cookies",
+                client,
+            )
+            cookie_ydl = get_fallback_ytdl(
+                client, flat=False, use_cookies=True
+            )
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(
+                        cookie_ydl.extract_info, query, download=False
+                    ),
+                    timeout=EXTRACT_TIMEOUT,
+                )
+            except Exception as cookie_error:
+                logger.error(
+                    "Cookie-authenticated alternate-client retry failed for %s: %s",
+                    client,
+                    cookie_error,
+                )
+                raise cookie_error from extraction_error
 
 
 def build_queries(search: str) -> list[str]:
