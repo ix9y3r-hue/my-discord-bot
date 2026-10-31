@@ -1428,6 +1428,7 @@ def _apply_music_emojis(view: discord.ui.View, guild: discord.Guild) -> None:
     emojis = {emoji.name: emoji for emoji in guild.emojis}
     button_emojis = {
         "previous_button": "music_previous",
+        "restart_button": "music_restart",
         "stop_button": "music_stop",
         "pause_button": "music_pause",
         "skip_button": "music_next",
@@ -1501,6 +1502,36 @@ class PlayerView(discord.ui.View):
         queue.insert(0, (current, interaction.channel))
         if previous:
             queue.insert(0, (previous, interaction.channel))
+        skipped_guilds.add(self.guild_id)
+        voice_client.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(
+        label="إعادة التشغيل",
+        emoji="🔄",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+    )
+    async def restart_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        voice_client = interaction.guild.voice_client
+        current = now_playing.get(self.guild_id)
+        if not voice_client or not current:
+            await interaction.response.send_message(
+                "ما فيه أغنية تعمل حاليًا لإعادة تشغيلها.",
+                ephemeral=True,
+            )
+            return
+        if not (voice_client.is_playing() or voice_client.is_paused()):
+            await interaction.response.send_message(
+                "التشغيل متوقف حاليًا؛ لا توجد أغنية لإعادتها.",
+                ephemeral=True,
+            )
+            return
+        # Re-queue the exact current track first. The skip marker prevents
+        # repeat modes and failure fallbacks from duplicating or replacing it.
+        queues.setdefault(self.guild_id, []).insert(0, (current, interaction.channel))
         skipped_guilds.add(self.guild_id)
         voice_client.stop()
         await interaction.response.defer()
