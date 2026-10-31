@@ -21,6 +21,10 @@ from youtube_cookie_monitor import (
     check_youtube_cookie_status as inspect_youtube_cookie_status,
     has_ytdlp_auth_cookies,
 )
+from youtube_local_download import (
+    cleanup_local_download,
+    download_youtube_audio,
+)
 from discord.ext import commands, tasks
 from flask import Flask
 
@@ -982,9 +986,10 @@ class TrackedFFmpegPCMAudio(discord.FFmpegPCMAudio):
 def build_ffmpeg_source(
     stream: dict[str, Any], volume: float
 ) -> discord.PCMVolumeTransformer:
-    before = FFMPEG_BEFORE
+    # A local yt-dlp download must not inherit HTTP reconnect options or headers.
+    before = "" if stream.get("local_file") else FFMPEG_BEFORE
     headers = stream.get("http_headers") or {}
-    if headers:
+    if headers and not stream.get("local_file"):
         header_str = "".join(f"{k}: {v}\r\n" for k, v in headers.items())
         before += f" -headers {shlex.quote(header_str)}"
     source = TrackedFFmpegPCMAudio(
@@ -1430,28 +1435,40 @@ async def play_next(guild: discord.Guild) -> None:
             track, requester_channel = queue.pop(0)
             stream: dict[str, Any] | None = None
             try:
-                selected_client = track.get("youtube_client")
+                is_youtube_track = is_youtube_query(track.get("webpage", ""))
                 if track.get("piped_fallback") == "true":
                     stream = await asyncio.to_thread(
                         get_piped_audio_stream,
                         track["webpage"],
                         track.get("piped_api") or None,
                     )
-                elif selected_client and is_youtube_query(track.get("webpage", "")):
-                    stream = await extract_youtube_info_with_client(
-                        track["webpage"], selected_client
-                    )
-                else:
-                    try:
-                        stream = await extract_info(
-                            track["webpage"],
-                            use_youtube_cookies=is_youtube_query(track.get("webpage", "")),
+                elif is_youtube_track:
+                    if youtube_is_paused():
+                        raise RuntimeError(
+                            "YouTube is temporarily paused after a bot-check; using fallback sources"
                         )
-                    except Exception as local_extraction_error:
-                        if not is_youtube_query(track.get("webpage", "")):
-                            raise
+                    # Let yt-dlp fetch media with the same session and headers.
+                    # FFmpeg receives a local file, not a separately fetched Googlevideo URL.
+                    ydl_options = dict(COOKIE_YTDL_OPTIONS or BASE_YTDL)
+                    selected_client = track.get("youtube_client")
+                    if selected_client in YOUTUBE_FALLBACK_CLIENTS:
+                        ydl_options["extractor_args"] = {
+                            "youtube": {"player_client": [selected_client]}
+                        }
+                    try:
+                        async with ytdl_lock:
+                            stream = await asyncio.to_thread(
+                                download_youtube_audio,
+                                track["webpage"],
+                                ydl_options,
+                            )
+                    except Exception as local_download_error:
+                        if looks_like_youtube_block(local_download_error):
+                            pause_youtube(local_download_error)
                         logger.warning(
-                            "Local YouTube extraction failed; trying Piped stream fallback"
+                            "yt-dlp local media download failed for %s (%s); trying Piped",
+                            track.get("title", "unknown track"),
+                            type(local_download_error).__name__,
                         )
                         stream = await asyncio.to_thread(
                             get_piped_audio_stream,
@@ -1459,9 +1476,14 @@ async def play_next(guild: discord.Guild) -> None:
                             track.get("piped_api") or None,
                         )
                         if not stream:
-                            raise local_extraction_error
+                            raise local_download_error
                         track["piped_fallback"] = "true"
                         track["piped_api"] = str(stream.get("api_base") or "")
+                    else:
+                        track["local_media_dir"] = str(stream.get("local_media_dir") or "")
+                        track["local_media_file"] = str(stream.get("url") or "")
+                else:
+                    stream = await extract_info(track["webpage"])
                 if not stream or not stream.get("url"):
                     raise ValueError("لم أتمكن من الحصول على رابط البث.")
                 source = build_ffmpeg_source(
@@ -1484,6 +1506,10 @@ async def play_next(guild: discord.Guild) -> None:
                     if return_code is None and process is not None:
                         return_code = process.poll()
                     playback_ok = error is None and return_code in (None, 0)
+                    # Remove local media only after FFmpeg has closed the file.
+                    # Repeat modes re-download on the next turn.
+                    cleanup_local_download(_track.pop("local_media_dir", None))
+                    _track.pop("local_media_file", None)
                     if error:
                         logger.error("Playback error: %s", error)
                     if return_code not in (None, 0):
@@ -1515,7 +1541,17 @@ async def play_next(guild: discord.Guild) -> None:
                     await show_panel(guild, requester_channel, track, stream)
                 return
             except Exception as playback_error:
-                logger.exception("Could not play track: %s", track["title"])
+                cleanup_local_download(track.pop("local_media_dir", None))
+                track.pop("local_media_file", None)
+                if is_youtube_query(track.get("webpage", "")):
+                    logger.warning(
+                        "Could not play YouTube track %s (%s): %s",
+                        track.get("title", "unknown track"),
+                        type(playback_error).__name__,
+                        str(playback_error).splitlines()[0][:240],
+                    )
+                else:
+                    logger.exception("Could not play track: %s", track["title"])
                 if now_playing.get(guild.id) is track:
                     now_playing.pop(guild.id, None)
                 error_text = str(playback_error).lower()
