@@ -18,5 +18,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Compile application modules
+        run: python -m py_compile main.py temp_voice.py youtube_cookie_monitor.py youtube_piped.py
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
