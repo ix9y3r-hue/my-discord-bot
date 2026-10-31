@@ -556,6 +556,41 @@ def set_target(guild_id: int, channel_id: int | None) -> None:
 voice_reconnect_tasks: dict[int, asyncio.Task[None]] = {}
 
 
+# --- YouTube circuit breaker ------------------------------------------------
+# When YouTube answers "Sign in to confirm you're not a bot", the host IP is
+# flagged. Retrying on every request is slow (up to EXTRACT_TIMEOUT each) and
+# makes the flag worse, so pause YouTube for a while and use SoundCloud.
+YT_BLOCK_COOLDOWN = int(os.getenv("YT_BLOCK_COOLDOWN", "600") or "600")
+_youtube_blocked_until = 0.0
+
+
+def youtube_is_paused() -> bool:
+    return time.monotonic() < _youtube_blocked_until
+
+
+def looks_like_youtube_block(error: BaseException) -> bool:
+    text = str(error).lower()
+    return any(
+        marker in text
+        for marker in (
+            "confirm you\u2019re not a bot",
+            "confirm you're not a bot",
+            "sign in to confirm",
+            "po token",
+        )
+    )
+
+
+def pause_youtube(error: BaseException) -> None:
+    global _youtube_blocked_until
+    if not youtube_is_paused():
+        logger.warning(
+            "YouTube bot-check detected; pausing YouTube for %ss and using SoundCloud",
+            YT_BLOCK_COOLDOWN,
+        )
+    _youtube_blocked_until = time.monotonic() + YT_BLOCK_COOLDOWN
+
+
 def is_youtube_query(query: str) -> bool:
     lowered = query.lower()
     return (
@@ -577,6 +612,8 @@ async def extract_info(
     )
     if use_cookies and cookie_ydl is None:
         logger.warning("Direct YouTube request requested cookies, but no valid cookie file is configured")
+    if is_youtube_query(query) and youtube_is_paused():
+        raise RuntimeError("YouTube is temporarily paused after a bot-check; using SoundCloud")
     async with ytdl_lock:
         try:
             return await asyncio.wait_for(
@@ -584,6 +621,8 @@ async def extract_info(
                 timeout=EXTRACT_TIMEOUT,
             )
         except Exception as extraction_error:
+            if is_youtube_query(query) and looks_like_youtube_block(extraction_error):
+                pause_youtube(extraction_error)
             logger.warning(
                 "Media extraction failed; handing off to the single fallback path: %s",
                 extraction_error,
@@ -627,7 +666,25 @@ async def youtube_title_from_oembed(url: str) -> str | None:
         except Exception as exc:
             logger.warning("Could not read YouTube public metadata: %s", exc)
             return None
-    return await asyncio.to_thread(request_title)
+    title = await asyncio.to_thread(request_title)
+    if title:
+        return title
+
+    # Second free source in case oEmbed is blocked from this host.
+    def request_title_noembed() -> str | None:
+        endpoint = "https://noembed.com/embed?" + urllib.parse.urlencode({"url": url})
+        request = urllib.request.Request(
+            endpoint, headers={"User-Agent": "Mozilla/5.0 (compatible; MusicBot/1.0)"}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            value = payload.get("title")
+            return value.strip() if isinstance(value, str) and value.strip() else None
+        except Exception as exc:
+            logger.warning("Could not read title from the backup source: %s", exc)
+            return None
+    return await asyncio.to_thread(request_title_noembed)
 
 
 
