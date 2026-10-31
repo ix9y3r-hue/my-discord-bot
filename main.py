@@ -17,7 +17,10 @@ from typing import Any
 import discord
 import yt_dlp
 from youtube_piped import get_audio_stream as get_piped_audio_stream, search_video as search_piped_youtube
-from youtube_cookie_monitor import check_youtube_cookie_status as inspect_youtube_cookie_status
+from youtube_cookie_monitor import (
+    check_youtube_cookie_status as inspect_youtube_cookie_status,
+    has_ytdlp_auth_cookies,
+)
 from discord.ext import commands, tasks
 from flask import Flask
 
@@ -97,8 +100,8 @@ BASE_YTDL = {
     # Temporary diagnostic mode: reveal whether yt-dlp loads bgutil and requests a PO Token.
     # Turn this off after checking Railway logs to avoid verbose routine logs.
     "verbose": os.getenv("YTDLP_VERBOSE", "").strip() == "1",
-    # Prefer Safari HLS for primary playback: Railway previously received CDN 403 even after mweb PO-token generation.
-    "extractor_args": {"youtube": {"player_client": ["web_safari"]}},
+    # Leave YouTube player-client selection to yt-dlp. With account cookies,
+    # its current defaults select clients that support authenticated sessions.
     # Let yt-dlp use Deno to solve YouTube JavaScript player challenges.
     "js_runtimes": {"deno": {}},
 }
@@ -144,7 +147,8 @@ except Exception:
         "YouTube cookies could not be loaded; continuing without cookies"
     )
 
-# Cookies are isolated to direct YouTube links; title searches remain cookie-free.
+# Use the configured session for YouTube searches and playback. SoundCloud-only
+# requests never pass through these YoutubeDL instances.
 COOKIE_YTDL_OPTIONS = (
     {**BASE_YTDL, "cookiefile": YOUTUBE_COOKIE_FILE}
     if YOUTUBE_COOKIE_FILE else None
@@ -159,6 +163,24 @@ ytdl_cookie_stream = (
     yt_dlp.YoutubeDL(COOKIE_YTDL_OPTIONS)
     if COOKIE_YTDL_OPTIONS else None
 )
+if ytdl_cookie_stream is not None:
+    try:
+        _yt_cookiejar = ytdl_cookie_stream.cookiejar
+        _yt_cookie_list = [
+            cookie for cookie in _yt_cookiejar
+            if str(getattr(cookie, "domain", "")).lstrip(".").lower() == "youtube.com"
+            or str(getattr(cookie, "domain", "")).lstrip(".").lower().endswith(".youtube.com")
+        ]
+        logger.info(
+            "yt-dlp cookiejar diagnostics: youtube_cookie_count=%d, authenticated=%s",
+            len(_yt_cookie_list),
+            has_ytdlp_auth_cookies(_yt_cookie_list),
+        )
+    except Exception as _cookie_diagnostic_error:
+        logger.warning(
+            "yt-dlp could not load the configured cookie jar (error=%s)",
+            type(_cookie_diagnostic_error).__name__,
+        )
 # Keep mweb as one alternate path; its GVS requests use the existing bgutil PO Token provider.
 YOUTUBE_FALLBACK_CLIENTS = ("mweb",)
 # Keep alternate extractors lazy: most requests succeed with the primary client,
@@ -782,7 +804,11 @@ async def find_named_fallback(title: str, *, prefer_soundcloud: bool = False) ->
     ]
     for source_name, query in sources:
         try:
-            data = await extract_info(query, flat=True)
+            data = await extract_info(
+                query,
+                flat=True,
+                use_youtube_cookies=(source_name == "youtube"),
+            )
         except Exception as exc:
             logger.warning("%s title search failed: %s", source_name, exc)
             continue
@@ -830,7 +856,7 @@ async def find_track(
     for query in queries:
         try:
             data = await extract_info(
-                query, flat=True, use_youtube_cookies=direct_youtube_url
+                query, flat=True, use_youtube_cookies=is_youtube_query(query)
             )
         except Exception as exc:
             last_error = exc
@@ -1419,7 +1445,7 @@ async def play_next(guild: discord.Guild) -> None:
                     try:
                         stream = await extract_info(
                             track["webpage"],
-                            use_youtube_cookies=track.get("requested_direct_youtube") == "true",
+                            use_youtube_cookies=is_youtube_query(track.get("webpage", "")),
                         )
                     except Exception as local_extraction_error:
                         if not is_youtube_query(track.get("webpage", "")):
