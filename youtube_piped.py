@@ -293,35 +293,31 @@ def _media_host_is_from_instance(
     ):
         return False
 
-    if proxy_url:
-        try:
-            proxy = urllib.parse.urlparse(proxy_url)
-        except ValueError:
-            return False
-        if (
-            proxy.scheme != "https"
-            or not proxy.hostname
-            or proxy.username
-            or proxy.password
-            or proxy.path not in ("", "/")
-            or proxy.query
-            or proxy.fragment
-        ):
-            return False
-        media_port = media.port or 443
-        proxy_port = proxy.port or 443
-        return (
-            media.hostname.lower() == proxy.hostname.lower()
-            and media_port == proxy_port
-        )
-
-    # Compatibility for older instances which omit proxyUrl from their response.
-    api_labels = api.hostname.lower().split(".")
-    if len(api_labels) < 2:
-        return media.hostname.lower() == api.hostname.lower()
-    instance_domain = ".".join(api_labels[-2:])
-    media_host = media.hostname.lower()
-    return media_host == instance_domain or media_host.endswith("." + instance_domain)
+    # Piped's documented /streams response includes proxyUrl. Do not infer
+    # trust from the last two hostname labels: public suffixes such as
+    # .com.de would allow unrelated hosts to pass that weak check.
+    if not proxy_url:
+        return False
+    try:
+        proxy = urllib.parse.urlparse(proxy_url)
+    except ValueError:
+        return False
+    if (
+        proxy.scheme != "https"
+        or not proxy.hostname
+        or proxy.username
+        or proxy.password
+        or proxy.path not in ("", "/")
+        or proxy.query
+        or proxy.fragment
+    ):
+        return False
+    media_port = media.port or 443
+    proxy_port = proxy.port or 443
+    return (
+        media.hostname.lower() == proxy.hostname.lower()
+        and media_port == proxy_port
+    )
 
 
 def get_audio_stream(
