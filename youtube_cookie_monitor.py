@@ -15,18 +15,40 @@ import urllib.request
 from typing import Any
 
 
-_AUTH_COOKIE_NAMES = {
-    "SID",
-    "HSID",
-    "SSID",
-    "APISID",
+_LOGIN_COOKIE_NAME = "LOGIN_INFO"
+_YOUTUBE_SID_COOKIE_NAMES = {
     "SAPISID",
-    "__Secure-1PSID",
-    "__Secure-3PSID",
-    "LOGIN_INFO",
+    "__Secure-1PAPISID",
+    "__Secure-3PAPISID",
 }
+_AUTH_COOKIE_NAMES = _YOUTUBE_SID_COOKIE_NAMES | {_LOGIN_COOKIE_NAME}
 _EXPIRY_WARNING_SECONDS = 7 * 24 * 60 * 60
 _CHECK_URL = "https://www.youtube.com/feed/subscriptions"
+
+
+def _is_youtube_cookie_domain(domain: str) -> bool:
+    normalized = str(domain or "").lstrip(".").lower()
+    return normalized == "youtube.com" or normalized.endswith(".youtube.com")
+
+
+def has_ytdlp_auth_cookies(cookies: Any) -> bool:
+    """Match yt-dlp's YouTube auth-cookie requirement without reading values."""
+    now = int(time.time())
+    names: set[str] = set()
+    for cookie in cookies:
+        name = str(getattr(cookie, "name", ""))
+        domain = str(getattr(cookie, "domain", ""))
+        expires = getattr(cookie, "expires", None)
+        if not _is_youtube_cookie_domain(domain):
+            continue
+        if expires is not None and expires <= now:
+            continue
+        if name in _AUTH_COOKIE_NAMES:
+            names.add(name)
+    return (
+        _LOGIN_COOKIE_NAME in names
+        and bool(names.intersection(_YOUTUBE_SID_COOKIE_NAMES))
+    )
 
 
 def check_youtube_cookie_status(
@@ -55,17 +77,12 @@ def check_youtube_cookie_status(
         cookie
         for cookie in jar
         if cookie.name in _AUTH_COOKIE_NAMES
-        and (
-            cookie.domain.lstrip(".") == "youtube.com"
-            or cookie.domain.lstrip(".").endswith(".youtube.com")
-            or cookie.domain.lstrip(".") == "google.com"
-            or cookie.domain.lstrip(".").endswith(".google.com")
-        )
+        and _is_youtube_cookie_domain(cookie.domain)
     ]
     if not auth_cookies:
         return {
             "status": "malformed",
-            "detail": "لم يتم العثور على كوكيز جلسة تسجيل دخول معروفة.",
+            "detail": "لم يتم العثور على كوكيز YouTube التي يتطلبها yt-dlp.",
             "expires_at": None,
         }
 
@@ -78,6 +95,15 @@ def check_youtube_cookie_status(
         return {
             "status": "expired",
             "detail": "تواريخ انتهاء كوكيز تسجيل الدخول المسجلة قد مضت.",
+            "expires_at": None,
+        }
+    if not has_ytdlp_auth_cookies(active_cookies):
+        return {
+            "status": "malformed",
+            "detail": (
+                "الكوكيز موجودة لكنها لا تحتوي تركيبة تسجيل الدخول التي يتعرف "
+                "عليها yt-dlp (LOGIN_INFO مع SAPISID أو PAPISID)."
+            ),
             "expires_at": None,
         }
 
