@@ -91,7 +91,7 @@ class MusicBot(commands.Bot):
 bot = MusicBot(command_prefix=get_command_prefix, intents=intents)
 
 BASE_YTDL = {
-    "format": "bestaudio[protocol^=m3u8_native]/bestaudio[protocol^=m3u8]/bestaudio",
+    "format": "bestaudio[abr<=128]/bestaudio",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
