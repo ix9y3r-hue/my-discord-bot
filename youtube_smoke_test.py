@@ -14,6 +14,39 @@ from pathlib import Path
 
 from youtube_local_download import cleanup_local_download, download_youtube_audio
 
+BGUTIL_SERVER = Path("/root/bgutil-ytdlp-pot-provider/server")
+BGUTIL_NODE_MODULES = BGUTIL_SERVER / "node_modules"
+
+
+def start_po_token_provider():
+    """Start the local BgUtils provider on loopback for this one-shot test."""
+    if not BGUTIL_NODE_MODULES.is_dir():
+        raise RuntimeError("PO_TOKEN_PROVIDER_FILES_MISSING")
+    process = subprocess.Popen(
+        [
+            "deno", "run", "--allow-env", "--allow-net", "--allow-ffi=.",
+            "--allow-read=.", "../src/main.ts", "--host", "127.0.0.1",
+        ],
+        cwd=str(BGUTIL_NODE_MODULES),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    import time
+    import urllib.request
+
+    for _ in range(20):
+        if process.poll() is not None:
+            raise RuntimeError("PO_TOKEN_PROVIDER_EXITED")
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:4416/ping", timeout=1):
+                return process
+        except Exception:
+            time.sleep(1)
+    process.terminate()
+    raise RuntimeError("PO_TOKEN_PROVIDER_TIMEOUT")
+
+
+
 
 def _failure_kind(error: BaseException) -> str:
     message = str(error).lower()
@@ -38,7 +71,9 @@ def main() -> int:
 
     cookie_path = ""
     media = None
+    provider = None
     try:
+        provider = start_po_token_provider()
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", prefix="yt-smoke-", suffix=".txt", delete=False
         ) as cookie_file:
@@ -102,6 +137,12 @@ def main() -> int:
                 os.remove(cookie_path)
             except OSError:
                 pass
+        if provider is not None and provider.poll() is None:
+            provider.terminate()
+            try:
+                provider.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                provider.kill()
 
 
 if __name__ == "__main__":
