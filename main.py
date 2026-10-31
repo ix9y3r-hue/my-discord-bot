@@ -16,6 +16,7 @@ from typing import Any
 
 import discord
 import yt_dlp
+from youtube_piped import get_audio_stream as get_piped_audio_stream, search_video as search_piped_youtube
 from youtube_cookie_monitor import check_youtube_cookie_status as inspect_youtube_cookie_status
 from discord.ext import commands, tasks
 from flask import Flask
@@ -725,8 +726,8 @@ async def extract_youtube_info_with_client(
 def build_queries(search: str) -> list[str]:
     if search.startswith(("http://", "https://")):
         return [search]
-    # The user's requested order: try YouTube first, then SoundCloud only if needed.
-    return [f"ytsearch1:{search}", f"scsearch1:{search}"]
+    # Keep YouTube as the first source; use Piped before SoundCloud when blocked.
+    return [f"ytsearch1:{search}"]
 
 
 async def youtube_title_from_oembed(url: str) -> str | None:
@@ -853,12 +854,31 @@ async def find_track(
             logger.error("SoundCloud-only search failed", exc_info=last_error)
         raise ValueError("ما حصلت الأغنية في ساوند كلاود. جرّب اسمًا أوضح أو رابط ساوند كلاود آخر.")
 
-    # If a direct YouTube link fails, tell the requester and search SoundCloud immediately.
+    # When Railway's YouTube egress is blocked, use a separate Piped instance.
+    # This fallback never receives YOUTUBE_COOKIES or Discord credentials.
     if direct_youtube_url:
+        try:
+            piped_stream = await asyncio.to_thread(get_piped_audio_stream, search)
+        except Exception as piped_error:
+            logger.warning("Piped direct-link fallback failed: %s", piped_error)
+            piped_stream = None
+        if piped_stream:
+            title = (
+                piped_stream.get("title")
+                or await youtube_title_from_oembed(search)
+                or "أغنية من يوتيوب"
+            )
+            return {
+                "title": str(title),
+                "webpage": search,
+                "requested_direct_youtube": "true",
+                "piped_fallback": "true",
+                "piped_api": str(piped_stream.get("api_base") or ""),
+            }
         if status_channel is not None:
             await send_safely(
                 status_channel,
-                "ما حصلت الأغنية في يوتيوب، بدور عليها في ساوند كلاود...",
+                "تعذر استخراج رابط يوتيوب من Railway؛ أجرب مسار YouTube بديلًا ثم ساوند كلاود...",
             )
         title = await youtube_title_from_oembed(search)
         if title:
@@ -866,6 +886,39 @@ async def find_track(
             if fallback:
                 logger.info("Direct YouTube URL failed; queued SoundCloud title fallback")
                 return fallback
+    else:
+        try:
+            piped_result = await asyncio.to_thread(search_piped_youtube, search)
+        except Exception as piped_error:
+            logger.warning("Piped YouTube title search failed: %s", piped_error)
+            piped_result = None
+        if piped_result:
+            logger.info("YouTube title search recovered through Piped")
+            return {
+                "title": str(piped_result.get("title") or search),
+                "webpage": str(piped_result["webpage"]),
+                "fallback_stage": "youtube",
+                "piped_fallback": "true",
+                "piped_api": str(piped_result.get("api_base") or ""),
+            }
+
+        # Preserve the existing YouTube -> SoundCloud fallback order.
+        try:
+            soundcloud_data = await extract_info(f"scsearch1:{search}", flat=True)
+            if soundcloud_data and soundcloud_data.get("entries") is not None:
+                soundcloud_data = next(
+                    (entry for entry in soundcloud_data["entries"] if entry), None
+                )
+            if soundcloud_data:
+                webpage = soundcloud_data.get("webpage_url") or soundcloud_data.get("url")
+                if webpage:
+                    return {
+                        "title": str(soundcloud_data.get("title") or search),
+                        "webpage": str(webpage),
+                        "fallback_stage": "soundcloud",
+                    }
+        except Exception as soundcloud_error:
+            logger.warning("SoundCloud title fallback failed: %s", soundcloud_error)
 
     if last_error:
         logger.error("All searches failed", exc_info=last_error)
@@ -1352,15 +1405,37 @@ async def play_next(guild: discord.Guild) -> None:
             stream: dict[str, Any] | None = None
             try:
                 selected_client = track.get("youtube_client")
-                if selected_client and is_youtube_query(track.get("webpage", "")):
+                if track.get("piped_fallback") == "true":
+                    stream = await asyncio.to_thread(
+                        get_piped_audio_stream,
+                        track["webpage"],
+                        track.get("piped_api") or None,
+                    )
+                elif selected_client and is_youtube_query(track.get("webpage", "")):
                     stream = await extract_youtube_info_with_client(
                         track["webpage"], selected_client
                     )
                 else:
-                    stream = await extract_info(
-                        track["webpage"],
-                        use_youtube_cookies=track.get("requested_direct_youtube") == "true",
-                    )
+                    try:
+                        stream = await extract_info(
+                            track["webpage"],
+                            use_youtube_cookies=track.get("requested_direct_youtube") == "true",
+                        )
+                    except Exception as local_extraction_error:
+                        if not is_youtube_query(track.get("webpage", "")):
+                            raise
+                        logger.warning(
+                            "Local YouTube extraction failed; trying Piped stream fallback"
+                        )
+                        stream = await asyncio.to_thread(
+                            get_piped_audio_stream,
+                            track["webpage"],
+                            track.get("piped_api") or None,
+                        )
+                        if not stream:
+                            raise local_extraction_error
+                        track["piped_fallback"] = "true"
+                        track["piped_api"] = str(stream.get("api_base") or "")
                 if not stream or not stream.get("url"):
                     raise ValueError("لم أتمكن من الحصول على رابط البث.")
                 source = build_ffmpeg_source(
@@ -1475,10 +1550,39 @@ async def advance_after_track(
     requester_channel: discord.abc.Messageable,
     finished_ok: bool,
 ) -> None:
-    # Never replay a failed YouTube URL or rotate through clients repeatedly.
-    # Do one SoundCloud title search; this avoids duplicate extraction requests.
+    # If extraction worked but FFmpeg later received a CDN 403, try one
+    # external Piped stream before the existing SoundCloud fallback.
+    piped_fallback_queued = False
     if (
         not finished_ok
+        and guild.id not in skipped_guilds
+        and is_youtube_query(finished_track.get("webpage", ""))
+        and finished_track.get("piped_fallback") != "true"
+        and finished_track.get("fallback_stage") != "soundcloud"
+    ):
+        try:
+            piped_stream = await asyncio.to_thread(
+                get_piped_audio_stream,
+                finished_track.get("webpage", ""),
+                finished_track.get("piped_api") or None,
+            )
+            if piped_stream:
+                retry_track = dict(finished_track)
+                retry_track["piped_fallback"] = "true"
+                retry_track["piped_api"] = str(piped_stream.get("api_base") or "")
+                queues.setdefault(guild.id, []).insert(0, (retry_track, requester_channel))
+                piped_fallback_queued = True
+                await send_safely(
+                    requester_channel,
+                    "رفض رابط الصوت المباشر من يوتيوب؛ أجرب الآن مسار بث بديلًا.",
+                )
+        except Exception as piped_error:
+            logger.warning("Piped playback fallback failed: %s", piped_error)
+
+    # If Piped cannot provide the audio, keep the existing one-shot SoundCloud fallback.
+    if (
+        not piped_fallback_queued
+        and not finished_ok
         and guild.id not in skipped_guilds
         and is_youtube_query(finished_track.get("webpage", ""))
         and finished_track.get("fallback_stage") != "soundcloud"
