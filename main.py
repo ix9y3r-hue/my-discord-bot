@@ -1032,41 +1032,107 @@ async def clear_panel(guild_id: int) -> None:
             pass
 
 
-QUEUE_PAGE_SIZE = 4
+QUEUE_PAGE_SIZE = 10
 
 
-class RemoveTrackButton(discord.ui.Button):
-    """زر ❌ جنبه اسم الأغنية؛ يشيلها من الطابور."""
+def _queue_track_title(track: Track) -> str:
+    title = " ".join(str(track.get("title") or "أغنية بدون اسم").split())
+    return title or "أغنية بدون اسم"
 
-    def __init__(self, number: int, track: Track, row: int) -> None:
-        title = track["title"]
-        label = f"{number}. {title}"
-        if len(label) > 70:
-            label = label[:67] + "..."
+
+def _queue_track_requester(track: Track) -> str:
+    return " ".join(str(track.get("requester") or "غير معروف").split())[:70]
+
+
+class QueueTrackSelect(discord.ui.Select):
+    """Select one queued track for a safe remove or move-to-front action."""
+
+    def __init__(
+        self,
+        queue_view: "QueueView",
+        entries: list[tuple[int, Track]],
+    ) -> None:
+        self.track_refs: dict[str, Track] = {}
+        options: list[discord.SelectOption] = []
+        for absolute_index, track in entries:
+            value = str(absolute_index)
+            self.track_refs[value] = track
+            title = _queue_track_title(track)
+            requester = _queue_track_requester(track)
+            options.append(
+                discord.SelectOption(
+                    label=f"{absolute_index + 1:02d}. {title}"[:100],
+                    value=value,
+                    description=f"طلبها: {requester}"[:100],
+                    default=track is queue_view.selected_track,
+                )
+            )
         super().__init__(
-            label=label,
-            emoji="❌",
-            style=discord.ButtonStyle.danger,
-            row=row,
+            placeholder="اختر أغنية لإدارتها",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
         )
-        self.track = track
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view = self.view
-        if isinstance(view, QueueView):
-            await view.remove_track(interaction, self.track)
+        if not isinstance(view, QueueView):
+            return
+        selected = self.track_refs.get(self.values[0])
+        current_queue = queues.get(view.guild_id, [])
+        if selected is None or not any(track is selected for track, _ in current_queue):
+            view.selected_track = None
+            await view._refresh(interaction, "تغيّرت القائمة قبل اختيار الأغنية. حدّث القائمة ثم اختر من جديد.")
+            return
+        view.selected_track = selected
+        await view._refresh(
+            interaction,
+            f"تم تحديد: **{_queue_track_title(selected)[:150]}**. اختر الإجراء المناسب.",
+        )
 
 
 class QueueView(discord.ui.View):
+    """Compact, paginated queue manager for mobile and desktop."""
+
     def __init__(self, guild_id: int, page: int = 0) -> None:
         super().__init__(timeout=300)
         self.guild_id = guild_id
         self.page = page
+        self.selected_track: Track | None = None
         self._build()
 
     def _total_pages(self) -> int:
         count = len(queues.get(self.guild_id, []))
         return max(1, -(-count // QUEUE_PAGE_SIZE))
+
+    def _selected_index(self, queue: list[tuple[Track, discord.abc.Messageable]]) -> int | None:
+        if self.selected_track is None:
+            return None
+        for index, (track, _channel) in enumerate(queue):
+            if track is self.selected_track:
+                return index
+        return None
+
+    def _add_button(
+        self,
+        *,
+        label: str,
+        emoji: str,
+        style: discord.ButtonStyle,
+        row: int,
+        callback: Any,
+        disabled: bool = False,
+    ) -> None:
+        button = discord.ui.Button(
+            label=label,
+            emoji=emoji,
+            style=style,
+            row=row,
+            disabled=disabled,
+        )
+        button.callback = callback
+        self.add_item(button)
 
     def _build(self) -> None:
         self.clear_items()
@@ -1074,75 +1140,287 @@ class QueueView(discord.ui.View):
         pages = self._total_pages()
         self.page = max(0, min(self.page, pages - 1))
         start = self.page * QUEUE_PAGE_SIZE
-        for offset, (track, _channel) in enumerate(
-            queue[start:start + QUEUE_PAGE_SIZE]
-        ):
-            self.add_item(RemoveTrackButton(start + offset + 1, track, offset))
-        if pages > 1:
-            prev_button = discord.ui.Button(
-                emoji="◀️",
-                style=discord.ButtonStyle.secondary,
-                row=4,
-                disabled=self.page == 0,
+        page_entries = [
+            (start + offset, track)
+            for offset, (track, _channel) in enumerate(
+                queue[start:start + QUEUE_PAGE_SIZE]
             )
-            prev_button.callback = self._prev_page
-            page_button = discord.ui.Button(
-                label=f"{self.page + 1}/{pages}",
-                style=discord.ButtonStyle.secondary,
-                row=4,
-                disabled=True,
-            )
-            next_button = discord.ui.Button(
-                emoji="▶️",
-                style=discord.ButtonStyle.secondary,
-                row=4,
-                disabled=self.page >= pages - 1,
-            )
-            next_button.callback = self._next_page
-            self.add_item(prev_button)
-            self.add_item(page_button)
-            self.add_item(next_button)
+        ]
 
-    def content(self) -> str:
-        queue = queues.get(self.guild_id, [])
-        current = now_playing.get(self.guild_id)
-        heading = f"🎵 تعمل الآن: **{current['title']}**\n" if current else ""
-        if not queue:
-            return heading + "قائمة الانتظار فارغة."
-        return (
-            heading
-            + f"📜 **قائمة الانتظار** ({len(queue)} أغنية)\n"
-            + "اضغط ❌ جنب الأغنية عشان تشيلها."
+        selected_index = self._selected_index(queue)
+        if selected_index is None:
+            self.selected_track = None
+
+        if page_entries:
+            self.add_item(QueueTrackSelect(self, page_entries))
+
+        has_selection = self.selected_track is not None
+        self._add_button(
+            label="اجعلها التالية",
+            emoji="⏭️",
+            style=discord.ButtonStyle.primary,
+            row=1,
+            callback=self._move_selected_next,
+            disabled=not has_selection,
+        )
+        self._add_button(
+            label="إزالة المحددة",
+            emoji="❌",
+            style=discord.ButtonStyle.danger,
+            row=1,
+            callback=self._remove_selected,
+            disabled=not has_selection,
         )
 
-    async def _refresh(self, interaction: discord.Interaction) -> None:
-        self._build()
-        if self.children:
-            await interaction.response.edit_message(
-                content=self.content(), view=self
-            )
+        self._add_button(
+            label="السابق",
+            emoji="◀️",
+            style=discord.ButtonStyle.secondary,
+            row=2,
+            callback=self._prev_page,
+            disabled=self.page == 0,
+        )
+        self._add_button(
+            label=f"{self.page + 1} / {pages}",
+            emoji="📄",
+            style=discord.ButtonStyle.secondary,
+            row=2,
+            callback=self._noop,
+            disabled=True,
+        )
+        self._add_button(
+            label="التالي",
+            emoji="▶️",
+            style=discord.ButtonStyle.secondary,
+            row=2,
+            callback=self._next_page,
+            disabled=self.page >= pages - 1,
+        )
+
+        self._add_button(
+            label="تحديث",
+            emoji="🔄",
+            style=discord.ButtonStyle.secondary,
+            row=3,
+            callback=self._refresh_button,
+        )
+        self._add_button(
+            label="تفريغ الطابور",
+            emoji="🗑️",
+            style=discord.ButtonStyle.danger,
+            row=3,
+            callback=self._ask_clear_queue,
+            disabled=not queue,
+        )
+
+    def make_embed(self, notice: str | None = None) -> discord.Embed:
+        queue = queues.get(self.guild_id, [])
+        current = now_playing.get(self.guild_id)
+        pages = self._total_pages()
+        embed = discord.Embed(
+            title=f"قائمة الانتظار  •  {len(queue)} أغنية",
+            color=0xE32636,
+        )
+
+        description_parts: list[str] = []
+        if current:
+            current_title = _queue_track_title(current)
+            current_url = current.get("webpage")
+            if current_url and str(current_url).startswith(("http://", "https://")):
+                description_parts.append(
+                    f"**تعمل الآن:** [{current_title[:180]}]({current_url})"
+                )
+            else:
+                description_parts.append(f"**تعمل الآن:** {current_title[:180]}")
         else:
-            await interaction.response.edit_message(
-                content=self.content(), view=None
+            description_parts.append("**لا توجد أغنية تعمل حاليًا.**")
+
+        if notice:
+            description_parts.append(notice)
+        elif queue:
+            description_parts.append("اختر أغنية من القائمة، ثم قدّمها لتكون التالية أو أزلها.")
+        else:
+            description_parts.append("الطابور فارغ. أضف أغنية وسيتم عرضها هنا.")
+
+        embed.description = "\n\n".join(description_parts)
+
+        if queue:
+            start = self.page * QUEUE_PAGE_SIZE
+            visible = queue[start:start + QUEUE_PAGE_SIZE]
+            for offset, (track, _channel) in enumerate(visible):
+                absolute_number = start + offset + 1
+                title = _queue_track_title(track)[:230]
+                requester = _queue_track_requester(track)
+                webpage = track.get("webpage", "")
+                if webpage and str(webpage).startswith(("http://", "https://")):
+                    value = f"الذي طلبها: {requester}  •  [فتح المصدر]({webpage})"
+                else:
+                    value = f"الذي طلبها: {requester}"
+                if track is self.selected_track:
+                    title = f"◀ {title}"
+                embed.add_field(
+                    name=f"{absolute_number:02d}  •  {title}",
+                    value=value[:1024],
+                    inline=False,
+                )
+
+        selected_index = self._selected_index(queue)
+        selected_note = (
+            f"  •  المحددة: رقم {selected_index + 1}"
+            if selected_index is not None else ""
+        )
+        embed.set_footer(
+            text=f"الصفحة {self.page + 1}/{pages}  •  يعرض {QUEUE_PAGE_SIZE} أغنيات في الصفحة{selected_note}"
+        )
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        voice_client = interaction.guild.voice_client if interaction.guild else None
+        user_voice = getattr(interaction.user, "voice", None)
+        if (
+            not voice_client
+            or not user_voice
+            or user_voice.channel != voice_client.channel
+        ):
+            await interaction.response.send_message(
+                "يجب أن تكون في نفس الروم الصوتي مع البوت لاستخدام إدارة الطابور.",
+                ephemeral=True,
             )
+            return False
+        return True
+
+    async def _refresh(
+        self,
+        interaction: discord.Interaction,
+        notice: str | None = None,
+    ) -> None:
+        self._build()
+        await interaction.response.edit_message(
+            embed=self.make_embed(notice),
+            view=self,
+        )
+
+    async def _noop(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
 
     async def _prev_page(self, interaction: discord.Interaction) -> None:
-        self.page -= 1
+        self.page = max(0, self.page - 1)
+        self.selected_track = None
         await self._refresh(interaction)
 
     async def _next_page(self, interaction: discord.Interaction) -> None:
-        self.page += 1
+        self.page = min(self._total_pages() - 1, self.page + 1)
+        self.selected_track = None
         await self._refresh(interaction)
 
-    async def remove_track(
-        self, interaction: discord.Interaction, track: Track
-    ) -> None:
+    async def _refresh_button(self, interaction: discord.Interaction) -> None:
+        await self._refresh(interaction, "تم تحديث القائمة من الطابور الحالي.")
+
+    async def _remove_selected(self, interaction: discord.Interaction) -> None:
         queue = queues.get(self.guild_id, [])
-        for index, (queued_track, _channel) in enumerate(queue):
-            if queued_track is track:
-                del queue[index]
-                break
-        await self._refresh(interaction)
+        index = self._selected_index(queue)
+        if index is None:
+            self.selected_track = None
+            await self._refresh(interaction, "لم تعد الأغنية المحددة موجودة. اختر أغنية أخرى.")
+            return
+        removed_track, _channel = queue.pop(index)
+        self.selected_track = None
+        await self._refresh(
+            interaction,
+            f"تمت إزالة **{_queue_track_title(removed_track)[:150]}** من الطابور.",
+        )
+
+    async def _move_selected_next(self, interaction: discord.Interaction) -> None:
+        queue = queues.get(self.guild_id, [])
+        index = self._selected_index(queue)
+        if index is None:
+            self.selected_track = None
+            await self._refresh(interaction, "لم تعد الأغنية المحددة موجودة. اختر أغنية أخرى.")
+            return
+        if index == 0:
+            await self._refresh(interaction, "هذه الأغنية هي التالية بالفعل.")
+            return
+        item = queue.pop(index)
+        queue.insert(0, item)
+        self.selected_track = item[0]
+        self.page = 0
+        await self._refresh(
+            interaction,
+            f"تم تقديم **{_queue_track_title(item[0])[:150]}** لتكون الأغنية التالية بعد الحالية.",
+        )
+
+    async def _ask_clear_queue(self, interaction: discord.Interaction) -> None:
+        confirm_view = QueueClearConfirmView(self.guild_id, self.page)
+        confirm_embed = discord.Embed(
+            title="تأكيد تفريغ الطابور",
+            description=(
+                "سيتم حذف جميع الأغاني القادمة من قائمة الانتظار.\n"
+                "الأغنية التي تعمل الآن لن تتوقف."
+            ),
+            color=0xE32636,
+        )
+        await interaction.response.edit_message(embed=confirm_embed, view=confirm_view)
+
+
+class QueueClearConfirmView(discord.ui.View):
+    def __init__(self, guild_id: int, return_page: int = 0) -> None:
+        super().__init__(timeout=60)
+        self.guild_id = guild_id
+        self.return_page = return_page
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        voice_client = interaction.guild.voice_client if interaction.guild else None
+        user_voice = getattr(interaction.user, "voice", None)
+        if (
+            not voice_client
+            or not user_voice
+            or user_voice.channel != voice_client.channel
+        ):
+            await interaction.response.send_message(
+                "يجب أن تكون في نفس الروم الصوتي مع البوت لتأكيد العملية.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(
+        label="نعم، أفرغ الطابور",
+        emoji="🗑️",
+        style=discord.ButtonStyle.danger,
+        row=0,
+    )
+    async def confirm_clear(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        queue = queues.setdefault(self.guild_id, [])
+        removed_count = len(queue)
+        queue.clear()
+        view = QueueView(self.guild_id)
+        await interaction.response.edit_message(
+            embed=view.make_embed(
+                f"تم حذف {removed_count} أغنية قادمة. الأغنية الحالية مستمرة."
+            ),
+            view=view,
+        )
+
+    @discord.ui.button(
+        label="إلغاء",
+        emoji="↩️",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+    )
+    async def cancel_clear(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        view = QueueView(self.guild_id, self.return_page)
+        await interaction.response.edit_message(
+            embed=view.make_embed("تم إلغاء تفريغ الطابور."),
+            view=view,
+        )
 
 
 def _apply_music_emojis(view: discord.ui.View, guild: discord.Guild) -> None:
@@ -1328,14 +1606,11 @@ class PlayerView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
         view = QueueView(self.guild_id)
-        if view.children:
-            await interaction.response.send_message(
-                view.content(), view=view, ephemeral=True
-            )
-        else:
-            await interaction.response.send_message(
-                view.content(), ephemeral=True
-            )
+        await interaction.response.send_message(
+            embed=view.make_embed(),
+            view=view,
+            ephemeral=True,
+        )
 
     @discord.ui.button(label="التبديل العشوائي", emoji="🔀", style=discord.ButtonStyle.secondary, row=1)
     async def shuffle_button(
@@ -2640,7 +2915,8 @@ async def toggle_repeat(
 @bot.command(name="طابور")
 @commands.guild_only()
 async def show_queue(ctx: commands.Context) -> None:
-    await ctx.send(queue_text(ctx.guild.id))
+    view = QueueView(ctx.guild.id)
+    await ctx.send(embed=view.make_embed(), view=view)
 
 
 @bot.command(name="اخرج")
