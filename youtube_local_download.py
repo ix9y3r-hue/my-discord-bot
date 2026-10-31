@@ -43,8 +43,8 @@ def download_youtube_audio(
     """Download one YouTube track and return metadata with a local audio path.
 
     The caller supplies the same yt-dlp format, JS-runtime, PO-token and cookie
-    options used by the main extractor. A private temporary directory is created
-    for every download and must be removed with cleanup_local_download().
+    options used by the main extractor. A private temporary directory is used for each download. Live videos retain their
+    direct stream URL and do not create a temporary download directory.
     """
     if not isinstance(url, str) or not url.startswith(("https://", "http://")):
         raise ValueError("A valid YouTube URL is required")
@@ -68,7 +68,26 @@ def download_youtube_audio(
     ydl = None
     try:
         ydl = ydl_factory(options)
-        info = ydl.extract_info(url, download=True)
+        # Extract once without downloading so live streams keep their existing
+        # direct-stream behavior instead of waiting forever for a live recording.
+        raw_info = ydl.extract_info(url, download=False, process=False)
+        if not isinstance(raw_info, dict):
+            raise RuntimeError("yt-dlp returned no video information")
+
+        live_status = str(raw_info.get("live_status") or "").lower()
+        if raw_info.get("is_live") is True or live_status == "is_live":
+            live_info = ydl.process_ie_result(raw_info, download=False)
+            if not isinstance(live_info, dict) or not live_info.get("url"):
+                raise RuntimeError("yt-dlp could not resolve the live stream URL")
+            result = dict(live_info)
+            result.update({"local_file": False, "live_stream": True})
+            shutil.rmtree(work_dir, ignore_errors=True)
+            work_dir = ""
+            return result
+
+        info = ydl.process_ie_result(raw_info, download=True)
+        if not isinstance(info, dict):
+            raise RuntimeError("yt-dlp did not return downloaded audio information")
 
         filepath = next(
             (
