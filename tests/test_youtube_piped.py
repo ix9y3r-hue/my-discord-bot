@@ -72,6 +72,16 @@ class PipedMediaValidationTests(unittest.TestCase):
             )
         )
 
+    def test_media_url_is_rejected_when_proxy_url_is_missing(self):
+        # A last-two-label domain check is unsafe for public suffixes such
+        # as .com.de; the documented proxyUrl must be present.
+        self.assertFalse(
+            youtube_piped._media_host_is_from_instance(
+                "https://cdn.privacy.com.de/audio",
+                "https://piped-api.privacy.com.de",
+            )
+        )
+
     def test_get_audio_stream_uses_documented_proxy_url(self):
         api_base = "https://api.piped.example.org"
         payload = {
