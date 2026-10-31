@@ -32,7 +32,27 @@ INSTANCE_REGISTRY_URL = (
 INSTANCE_CACHE_TTL = 6 * 60 * 60
 MAX_SEARCH_INSTANCES = 5
 MAX_STREAM_INSTANCES = 3
+try:
+    STREAM_FAILURE_COOLDOWN_SECONDS = max(
+        30, min(900, int(os.getenv("PIPED_STREAM_FAILURE_COOLDOWN", "300")))
+    )
+except (TypeError, ValueError):
+    STREAM_FAILURE_COOLDOWN_SECONDS = 300
+_STREAM_FAILURE_UNTIL = 0.0
+_STREAM_FAILURE_LOCK = threading.Lock()
 _INSTANCE_CACHE_LOCK = threading.Lock()
+
+
+def _stream_failure_cooldown_remaining() -> int:
+    with _STREAM_FAILURE_LOCK:
+        return max(0, int(_STREAM_FAILURE_UNTIL - time.monotonic()))
+
+
+def _reset_stream_failure_cooldown() -> None:
+    global _STREAM_FAILURE_UNTIL
+    with _STREAM_FAILURE_LOCK:
+        _STREAM_FAILURE_UNTIL = 0.0
+
 _INSTANCE_CACHE: list[tuple[str, bool]] = []
 _INSTANCE_CACHE_AT = 0.0
 
@@ -329,6 +349,14 @@ def get_audio_stream(
     if not video_id:
         return None
 
+    cooldown_remaining = _stream_failure_cooldown_remaining()
+    if cooldown_remaining:
+        logger.info(
+            "Piped stream fallback is cooling down after failed instances (%ss remaining)",
+            cooldown_remaining,
+        )
+        return None
+
     for api_base in _api_urls(preferred_api, require_cdn=True):
         try:
             payload = _request_json(api_base, f"/streams/{video_id}")
@@ -381,6 +409,7 @@ def get_audio_stream(
                 )
                 continue
             _, selected = max(candidates, key=lambda entry: entry[0])
+            _reset_stream_failure_cooldown()
             return {
                 "url": selected["url"],
                 "http_headers": {"User-Agent": USER_AGENT},
@@ -396,5 +425,13 @@ def get_audio_stream(
                 _url_host(api_base),
                 _error_kind(exc),
             )
-    logger.warning("Piped stream failed for video_id=%s on all eligible CDN instances", video_id)
+    global _STREAM_FAILURE_UNTIL
+    with _STREAM_FAILURE_LOCK:
+        _STREAM_FAILURE_UNTIL = time.monotonic() + STREAM_FAILURE_COOLDOWN_SECONDS
+    logger.warning(
+        "Piped stream failed for video_id=%s on all eligible CDN instances; "
+        "cooling down for %ss",
+        video_id,
+        STREAM_FAILURE_COOLDOWN_SECONDS,
+    )
     return None
