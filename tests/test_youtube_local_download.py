@@ -13,15 +13,23 @@ class FakeYoutubeDL:
         self.download_calls = []
         self.closed = False
 
-    def extract_info(self, url, download=False):
-        self.download_calls.append((url, download))
+    def extract_info(self, url, download=False, process=True):
+        self.download_calls.append((url, download, process))
         if not self.produce_file:
             return {"id": "video123", "title": "Test audio"}
+        return {"id": "video123", "title": "Test audio"}
+
+    def process_ie_result(self, info, download=True):
+        if not download:
+            return {
+                **info,
+                "url": "https://example.test/live.m3u8",
+                "http_headers": {"User-Agent": "test-agent"},
+            }
         output = self.options["outtmpl"].replace("%(id)s", "video123").replace("%(ext)s", "webm")
         Path(output).write_bytes(b"test-audio")
         return {
-            "id": "video123",
-            "title": "Test audio",
+            **info,
             "requested_downloads": [{"filepath": output, "format_id": "251"}],
         }
 
@@ -49,7 +57,7 @@ class YoutubeLocalDownloadTests(unittest.TestCase):
             self.assertTrue(os.path.isabs(result["url"]))
             self.assertEqual(Path(result["url"]).read_bytes(), b"test-audio")
             self.assertEqual(instances[0].download_calls, [
-                ("https://www.youtube.com/watch?v=AbCdEf12345", True)
+                ("https://www.youtube.com/watch?v=AbCdEf12345", False, False)
             ])
             self.assertEqual(instances[0].options["cookiefile"], "/private/cookies.txt")
             self.assertEqual(instances[0].options["js_runtimes"], {"deno": {}})
@@ -60,6 +68,43 @@ class YoutubeLocalDownloadTests(unittest.TestCase):
             cleanup_local_download(result["local_media_dir"])
 
         self.assertFalse(os.path.exists(result["local_media_dir"]))
+
+    def test_live_stream_is_returned_directly_without_downloading(self):
+        class FakeLiveYoutubeDL(FakeYoutubeDL):
+            def extract_info(self, url, download=False, process=True):
+                self.download_calls.append((url, download, process))
+                return {
+                    "id": "live123",
+                    "title": "Live test",
+                    "is_live": True,
+                    "live_status": "is_live",
+                }
+
+            def process_ie_result(self, info, download=True):
+                self.assertion_download = download
+                return {
+                    **info,
+                    "url": "https://example.test/live.m3u8",
+                    "http_headers": {"User-Agent": "test-agent"},
+                }
+
+        instances = []
+
+        def factory(options):
+            instance = FakeLiveYoutubeDL(options)
+            instances.append(instance)
+            return instance
+
+        result = download_youtube_audio(
+            "https://www.youtube.com/watch?v=AbCdEf12345",
+            ydl_factory=factory,
+        )
+        self.assertEqual(result["url"], "https://example.test/live.m3u8")
+        self.assertTrue(result["live_stream"])
+        self.assertFalse(result["local_file"])
+        self.assertNotIn("local_media_dir", result)
+        self.assertFalse(instances[0].assertion_download)
+        self.assertTrue(instances[0].closed)
 
     def test_missing_output_fails_and_cleans_temporary_directory(self):
         created = []
