@@ -26,6 +26,8 @@ class FakeYoutubeDL:
                 "url": "https://example.test/live.m3u8",
                 "http_headers": {"User-Agent": "test-agent"},
             }
+        if not self.produce_file:
+            return info
         output = self.options["outtmpl"].replace("%(id)s", "video123").replace("%(ext)s", "webm")
         Path(output).write_bytes(b"test-audio")
         return {
