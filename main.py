@@ -1186,7 +1186,7 @@ class PlayerView(discord.ui.View):
         self.guild_id = guild_id
         self.embed = embed
         if guild_id in repeat_guilds or guild_id in queue_repeat_guilds:
-            self.repeat_button.style = discord.ButtonStyle.primary
+            self.repeat_button.style = discord.ButtonStyle.danger
         else:
             self.repeat_button.style = discord.ButtonStyle.secondary
 
@@ -1292,6 +1292,13 @@ class PlayerView(discord.ui.View):
         self.embed.set_footer(text=player_footer_text(self.guild_id))
         await interaction.response.edit_message(embed=self.embed, view=self)
 
+    @discord.ui.button(label="خفض الصوت", emoji="🔉", style=discord.ButtonStyle.secondary, row=1)
+    async def volume_down_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await self._change_volume(interaction, -VOLUME_STEP)
+
+
     @discord.ui.button(
         label="التكرار متوقف",
         emoji="🔁",
@@ -1308,7 +1315,7 @@ class PlayerView(discord.ui.View):
         elif guild_id in repeat_guilds:
             repeat_guilds.discard(guild_id)
             queue_repeat_guilds.add(guild_id)
-            button.style = discord.ButtonStyle.primary
+            button.style = discord.ButtonStyle.danger
         else:
             queue_repeat_guilds.discard(guild_id)
             repeat_guilds.discard(guild_id)
@@ -1353,13 +1360,6 @@ class PlayerView(discord.ui.View):
     ) -> None:
         await self._change_volume(interaction, VOLUME_STEP)
 
-    @discord.ui.button(label="خفض الصوت", emoji="🔉", style=discord.ButtonStyle.secondary, row=1)
-    async def volume_down_button(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
-        await self._change_volume(interaction, -VOLUME_STEP)
-
-
 async def show_panel(
     guild: discord.Guild,
     channel: discord.abc.Messageable,
@@ -1376,12 +1376,14 @@ async def show_panel(
             pass
         except discord.DiscordException:
             logger.warning("Could not delete the previous player panel")
-    volume = volumes.get(guild.id, DEFAULT_VOLUME)
     safe_title = " ".join(track["title"].replace("[", "(").replace("]", ")").split())
+    artist = str(stream.get("uploader") or "مصدر الموسيقى").strip()[:70]
+    duration = format_duration(stream.get("duration")) or "غير محددة"
+    requester = str(track.get("requester") or "غير معروف").strip()[:45]
+    details = f"{artist}  •  {duration}  •  طلبها {requester}"
     embed = discord.Embed(
-        title=safe_title[:256],
-        url=track["webpage"],
-        color=0xA99AF0,
+        description=f"**[{safe_title[:170]}]({track['webpage']})**\n{details[:240]}",
+        color=0xE32636,
     )
     bot_emoji = next(
         (emoji for emoji in guild.emojis if emoji.name == "music_bot"),
@@ -1393,13 +1395,6 @@ async def show_panel(
         embed.set_author(name="NOW PLAYING  •  يعمل الآن")
     if stream.get("thumbnail"):
         embed.set_thumbnail(url=stream["thumbnail"])
-    if stream.get("uploader"):
-        embed.add_field(name="الفنان", value=str(stream["uploader"])[:1024], inline=True)
-    duration = format_duration(stream.get("duration"))
-    if duration:
-        embed.add_field(name="المدة", value=duration, inline=True)
-    if track.get("requester"):
-        embed.add_field(name="طلبها", value=str(track["requester"])[:1024], inline=True)
     embed.set_footer(text=player_footer_text(guild.id))
     try:
         player_view = PlayerView(guild.id, embed)
