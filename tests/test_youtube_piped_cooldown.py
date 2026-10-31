@@ -18,9 +18,9 @@ class PipedCooldownTests(unittest.TestCase):
             url = "https://www.youtube.com/watch?v=AbCdEf12345"
             self.assertIsNone(youtube_piped.get_audio_stream(url))
             self.assertIsNone(youtube_piped.get_audio_stream(url))
+            self.assertEqual(youtube_piped._stream_failure_cooldown_remaining(), 300)
         self.assertEqual(instances.call_count, 1)
         self.assertEqual(request.call_count, 1)
-        self.assertEqual(youtube_piped._stream_failure_cooldown_remaining(), 300)
 
     def test_success_clears_previous_cooldown(self):
         with youtube_piped._STREAM_FAILURE_LOCK:
