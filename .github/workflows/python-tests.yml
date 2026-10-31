@@ -19,6 +19,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile application modules
-        run: python -m py_compile main.py temp_voice.py youtube_cookie_monitor.py youtube_piped.py youtube_local_download.py
+        run: python -m py_compile main.py temp_voice.py youtube_cookie_monitor.py youtube_piped.py youtube_local_download.py youtube_smoke_test.py
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
