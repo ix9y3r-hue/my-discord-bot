@@ -83,7 +83,7 @@ class MusicBot(commands.Bot):
 bot = MusicBot(command_prefix=get_command_prefix, intents=intents)
 
 BASE_YTDL = {
-    "format": "bestaudio/best",
+    "format": "bestaudio[protocol^=m3u8_native]/bestaudio[protocol^=m3u8]/bestaudio",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
@@ -99,7 +99,7 @@ BASE_YTDL = {
     # Official bgutil guidance: if a client fails before requesting a PO Token,
     # let yt-dlp try these supported clients within the same extraction call.
     # This is not an external retry loop and does not enable cookies.
-    "extractor_args": {"youtube": {"player_client": ["mweb", "tv", "web_safari"]}},
+    "extractor_args": {"youtube": {"player_client": ["web_safari"]}},
     # Let yt-dlp use Deno to solve YouTube JavaScript player challenges.
     "js_runtimes": {"deno": {}},
 }
