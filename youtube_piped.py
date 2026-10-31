@@ -67,7 +67,9 @@ def _parse_instance_registry(markdown: str) -> list[tuple[str, bool]]:
     seen: set[str] = set()
     for line in str(markdown or "").splitlines():
         line = line.strip()
-        if not line.startswith("|"):
+        # TeamPiped's published Markdown table uses plain rows without
+        # leading/trailing pipe characters; accept both common table styles.
+        if "|" not in line:
             continue
         cells = [cell.strip() for cell in line.strip("|").split("|")]
         if len(cells) < 4:
