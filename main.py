@@ -16,6 +16,7 @@ from typing import Any
 
 import discord
 import yt_dlp
+from youtube_cookie_monitor import check_youtube_cookie_status as inspect_youtube_cookie_status
 from discord.ext import commands, tasks
 from flask import Flask
 
@@ -113,6 +114,7 @@ if _yt_proxy:
 YOUTUBE_COOKIE_FILE: str | None = None
 _raw_youtube_cookies = os.getenv("YOUTUBE_COOKIES", "")
 _legacy_youtube_cookies_b64 = os.getenv("YT_COOKIES_B64", "").strip()
+YOUTUBE_COOKIES_CONFIGURED = bool(_raw_youtube_cookies.strip() or _legacy_youtube_cookies_b64)
 try:
     _cookie_bytes: bytes | None = None
     if _raw_youtube_cookies.strip():
@@ -252,6 +254,36 @@ def save_notification_channels() -> bool:
 
 
 notification_channels: dict[int, int] = load_notification_channels()
+YOUTUBE_COOKIE_STATUS_FILE = os.getenv(
+    "YOUTUBE_COOKIE_STATUS_FILE",
+    os.path.join(DATA_DIR, "youtube_cookie_status.json"),
+)
+
+
+def load_youtube_cookie_monitor_state() -> dict[str, Any]:
+    try:
+        with open(YOUTUBE_COOKIE_STATUS_FILE, encoding="utf-8") as file:
+            value = json.load(file)
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def save_youtube_cookie_monitor_state(state: dict[str, Any]) -> None:
+    try:
+        parent = os.path.dirname(YOUTUBE_COOKIE_STATUS_FILE)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        temporary_path = f"{YOUTUBE_COOKIE_STATUS_FILE}.tmp"
+        with open(temporary_path, "w", encoding="utf-8") as file:
+            json.dump(state, file, ensure_ascii=False, indent=2)
+        os.replace(temporary_path, YOUTUBE_COOKIE_STATUS_FILE)
+    except OSError:
+        logger.exception("Could not save YouTube cookie monitor state")
+
+
+youtube_cookie_monitor_state = load_youtube_cookie_monitor_state()
+youtube_cookie_check_lock = asyncio.Lock()
 
 
 async def send_guild_notification(guild: discord.Guild, message: str) -> bool:
@@ -288,6 +320,57 @@ async def notify_all_guilds(message: str) -> None:
             await send_guild_notification(guild, message)
         except Exception:
             logger.exception("Unexpected notification failure for guild %s", guild.id)
+
+
+def youtube_cookie_status_message(result: dict[str, Any]) -> str:
+    status = result.get("status", "unknown")
+    detail = str(result.get("detail", "")).strip()
+    messages = {
+        "missing": "لم أجد كوكيز يوتيوب في إعدادات البوت.",
+        "malformed": "قيمة كوكيز يوتيوب موجودة لكنها غير مقروءة أو لا تحتوي بيانات جلسة معروفة.",
+        "expired": "انتهت صلاحية كوكيز يوتيوب أو لم تعد جلسة الدخول صالحة.",
+        "invalid": "يوتيوب أفاد بأن جلسة تسجيل الدخول غير صالحة.",
+        "expiring": "بعض كوكيز جلسة يوتيوب تقترب من تاريخ الانتهاء.",
+        "valid": "تم التحقق من جلسة يوتيوب، وتبدو الكوكيز صالحة حاليًا.",
+        "unknown": "تعذر التأكد من صلاحية جلسة يوتيوب. هذا لا يعني بالضرورة أن الكوكيز منتهية.",
+    }
+    return f"{messages.get(status, messages['unknown'])} {detail}".strip()
+
+
+async def run_youtube_cookie_check() -> dict[str, Any]:
+    async with youtube_cookie_check_lock:
+        result = await asyncio.to_thread(
+            inspect_youtube_cookie_status,
+            YOUTUBE_COOKIE_FILE,
+            YOUTUBE_COOKIES_CONFIGURED,
+        )
+        status = str(result.get("status", "unknown"))
+        previous = youtube_cookie_monitor_state.get("status")
+        youtube_cookie_monitor_state.update(
+            {"status": status, "checked_at": time.time()}
+        )
+        save_youtube_cookie_monitor_state(youtube_cookie_monitor_state)
+
+        warning_statuses = {
+            "missing", "malformed", "expired", "invalid", "expiring"
+        }
+        if status in warning_statuses and status != previous:
+            await notify_all_guilds(
+                "**تنبيه كوكيز يوتيوب**\n"
+                + youtube_cookie_status_message(result)
+                + "\nإذا احتجت تحديثها، حدّث YOUTUBE_COOKIES في Railway ثم أعد نشر الخدمة. لا تشارك محتوى الكوكيز مع أي شخص."
+            )
+        elif status == "valid" and previous in warning_statuses:
+            await notify_all_guilds(
+                "**تم التحقق من كوكيز يوتيوب**\nعادت جلسة يوتيوب لتبدو صالحة."
+            )
+        elif status == "unknown" and previous == "valid":
+            await notify_all_guilds(
+                "**تعذر فحص كوكيز يوتيوب مؤقتًا**\n"
+                + youtube_cookie_status_message(result)
+            )
+        logger.info("YouTube cookie monitor result: %s", status)
+        return result
 
 
 async def graceful_shutdown(signum: int) -> None:
@@ -1557,6 +1640,19 @@ def ensure_reconnect(guild_id: int) -> None:
     task.add_done_callback(clear_task)
 
 
+@tasks.loop(hours=12)
+async def youtube_cookie_watchdog() -> None:
+    try:
+        await run_youtube_cookie_check()
+    except Exception:
+        logger.exception("Automatic YouTube cookie check failed")
+
+
+@youtube_cookie_watchdog.before_loop
+async def before_youtube_cookie_watchdog() -> None:
+    await bot.wait_until_ready()
+
+
 @tasks.loop(seconds=30)
 async def voice_watchdog() -> None:
     for guild_id, channel_id in list(voice_targets.items()):
@@ -1653,6 +1749,8 @@ async def on_ready() -> None:
     # أعد تشغيل مراقبة الاتصال لضمان رجوع البوت للروم المحفوظ بعد الانقطاع أو إعادة التشغيل.
     if not voice_watchdog.is_running():
         voice_watchdog.start()
+    if not youtube_cookie_watchdog.is_running():
+        youtube_cookie_watchdog.start()
 
     # Start fresh activity sampling on reconnect so downtime is never counted.
     now = time.time()
@@ -1851,6 +1949,37 @@ class RolePanelView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
         await interaction.response.send_modal(RoleCreateModal())
+
+
+@bot.tree.command(
+    name="فحص_كوكيز",
+    description="فحص حالة كوكيز يوتيوب يدويًا",
+)
+@discord.app_commands.guild_only()
+@discord.app_commands.default_permissions(manage_guild=True)
+async def youtube_cookies_check_command(interaction: discord.Interaction) -> None:
+    member = interaction.user
+    if not isinstance(member, discord.Member) or not (
+        member.guild_permissions.manage_guild
+        or member.guild_permissions.administrator
+    ):
+        await interaction.response.send_message(
+            "تحتاج صلاحية إدارة السيرفر لاستخدام هذا الأمر.", ephemeral=True
+        )
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        result = await run_youtube_cookie_check()
+        await interaction.followup.send(
+            "**نتيجة فحص كوكيز يوتيوب**\n" + youtube_cookie_status_message(result),
+            ephemeral=True,
+        )
+    except Exception:
+        logger.exception("Manual YouTube cookie check failed")
+        await interaction.followup.send(
+            "تعذر إكمال الفحص. راجع سجلات Railway، ولم يتم عرض أي محتوى من الكوكيز.",
+            ephemeral=True,
+        )
 
 
 @bot.tree.command(
