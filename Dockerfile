@@ -26,8 +26,8 @@ COPY requirements.txt ./
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 # Include all runtime Python modules and the automatic join sound.
-COPY main.py temp_voice.py youtube_cookie_monitor.py patch_main.py join_sound.mp3 ./
-RUN python patch_main.py && python -m py_compile main.py temp_voice.py youtube_cookie_monitor.py
+COPY main.py temp_voice.py youtube_cookie_monitor.py youtube_piped.py patch_main.py join_sound.mp3 ./
+RUN python patch_main.py && python -m py_compile main.py temp_voice.py youtube_cookie_monitor.py youtube_piped.py
 
 EXPOSE 8080
 # Start the PO Token provider on loopback only, then start the Discord bot.
