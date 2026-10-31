@@ -96,10 +96,8 @@ BASE_YTDL = {
     # Temporary diagnostic mode: reveal whether yt-dlp loads bgutil and requests a PO Token.
     # Turn this off after checking Railway logs to avoid verbose routine logs.
     "verbose": os.getenv("YTDLP_VERBOSE", "").strip() == "1",
-    # Official bgutil guidance: if a client fails before requesting a PO Token,
-    # let yt-dlp try these supported clients within the same extraction call.
-    # This is not an external retry loop and does not enable cookies.
-    "extractor_args": {"youtube": {"player_client": ["web_safari"]}},
+    # yt-dlp recommends mweb with a PO Token provider for GVS requests.
+    "extractor_args": {"youtube": {"player_client": ["mweb"]}},
     # Let yt-dlp use Deno to solve YouTube JavaScript player challenges.
     "js_runtimes": {"deno": {}},
 }
@@ -160,8 +158,8 @@ ytdl_cookie_stream = (
     yt_dlp.YoutubeDL(COOKIE_YTDL_OPTIONS)
     if COOKIE_YTDL_OPTIONS else None
 )
-# Use the documented mweb + PO-token setup; do not rotate through clients on each failure.
-YOUTUBE_FALLBACK_CLIENTS = ("mweb",)
+# Keep one alternate HLS-capable client available without repeating the primary mweb client.
+YOUTUBE_FALLBACK_CLIENTS = ("web_safari",)
 # Keep alternate extractors lazy: most requests succeed with the primary client,
 # so do not allocate extra YoutubeDL instances until a fallback is actually needed.
 ytdl_search_fallbacks: dict[str, yt_dlp.YoutubeDL] = {}
