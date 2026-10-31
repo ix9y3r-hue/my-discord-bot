@@ -21,6 +21,25 @@ class PipedInstanceRegistryTests(unittest.TestCase):
             ],
         )
 
+    def test_registry_parser_accepts_official_plain_markdown_table(self):
+        # This is the format published by TeamPiped: table rows do not start
+        # with a leading pipe character.
+        registry = """
+Instance Name | Instance API URL | Instance Location(s) | CDN | Registered Users
+--- | --- | --- | --- | ---
+kavin.rocks (Official) | https://pipedapi.kavin.rocks | US, IN | Yes | badge
+leptons.xyz | https://pipedapi.leptons.xyz | AT | Yes | badge
+privacy.com.de | https://piped-api.privacy.com.de | DE | No | badge
+"""
+        self.assertEqual(
+            youtube_piped._parse_instance_registry(registry),
+            [
+                ("https://pipedapi.kavin.rocks", True),
+                ("https://pipedapi.leptons.xyz", True),
+                ("https://piped-api.privacy.com.de", False),
+            ],
+        )
+
     def test_registry_parser_deduplicates_api_urls(self):
         registry = """
 | Name | API | Locations | CDN |
