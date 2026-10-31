@@ -20,6 +20,10 @@
 - Keep Piped network timeouts bounded; do not add unbounded retries or background polling.
 - Do not deploy to production as part of the test work. A PR and verified tests precede any production release.
 
+
+
+**Ruling:** The official Piped API documents `proxyUrl` in `/streams/:videoId` responses. Rejecting responses without it is safer than a suffix-based compatibility fallback, which can trust unrelated hosts on public suffixes such as `.com.de`. The cost if this is wrong is that an older nonconforming instance will be skipped.
+
 ## Review Focus
 
 - Public instance registry unavailable, malformed, or changed: bounded fallback to the built-in known API list.
@@ -54,7 +58,7 @@
 - Add a parser that returns validated `(api_url, has_cdn)` records from the official public-instance registry.
 - Add a bounded in-memory cache for discovery; fall back to the current three known CDN instances when discovery fails.
 - Preserve `PIPED_API_URLS` as an explicit operator override.
-- Update stream validation to use the `proxyUrl` hostname returned by `/streams/:videoId`; retain a conservative legacy fallback only when `proxyUrl` is absent.
+- Require the documented `proxyUrl` from `/streams/:videoId` and reject media URLs when it is absent; do not infer trust from shared hostname suffixes.
 - For audio streaming, prefer instances marked CDN-capable; metadata search may use a small bounded set of other valid API instances.
 
 - [ ] Implement only after Task 1's tests have been observed failing.
