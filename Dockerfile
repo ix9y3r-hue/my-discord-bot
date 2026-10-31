@@ -8,7 +8,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates git \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && command -v ffmpeg \
+    && ffmpeg -version
 
 # Copy the prebuilt Deno binary instead of downloading/installing it during
 # the build; the previous installer step repeatedly timed out on Railway.
