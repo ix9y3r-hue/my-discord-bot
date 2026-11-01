@@ -88,7 +88,10 @@ class MusicBot(commands.Bot):
         await self.load_extension("temp_voice")
 
 
-bot = MusicBot(command_prefix=get_command_prefix, intents=intents)
+# Keep a bounded Discord message cache. The bot does not use cached message
+# history for its music, voice-room, or moderation features; those features
+# fetch history from Discord when needed. A smaller cache reduces idle RAM use.
+bot = MusicBot(command_prefix=get_command_prefix, intents=intents, max_messages=100)
 
 BASE_YTDL = {
     "format": "bestaudio[abr<=128]/bestaudio",
