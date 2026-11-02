@@ -465,6 +465,7 @@ def load_voice_stats() -> dict[int, dict[str, Any]]:
                 continue
             result[int(guild_key)] = {
                 "channel_id": int(value["channel_id"]) if value.get("channel_id") else None,
+                "enabled": bool(value.get("enabled", True)),
                 "period_start": float(value.get("period_start", time.time())),
                 "last_tick": float(value.get("last_tick", time.time())),
                 "last_report": float(value.get("last_report", value.get("period_start", time.time()))),
@@ -2140,7 +2141,7 @@ async def voice_stats_watchdog() -> None:
     now = time.time()
     for guild in bot.guilds:
         record = voice_stats.get(guild.id)
-        if not record or not record.get("channel_id"):
+        if not record or not record.get("channel_id") or not record.get("enabled", True):
             continue
 
         period_start = float(record.get("period_start", now))
@@ -2257,7 +2258,7 @@ async def on_voice_state_update(
     # Track human joins/leaves immediately so brief visits are not missed by polling.
     guild_id = member.guild.id
     record = voice_stats.get(guild_id)
-    if record and record.get("channel_id") and before.channel != after.channel:
+    if record and record.get("channel_id") and record.get("enabled", True) and before.channel != after.channel:
         now = time.time()
         last_tick = float(record.get("last_tick", now))
         elapsed = max(0.0, now - last_tick)
@@ -2649,6 +2650,7 @@ async def setup_voice_stats(interaction: discord.Interaction) -> None:
     if not record or not record.get("channel_id"):
         record = {
             "channel_id": interaction.channel.id,
+            "enabled": True,
             "period_start": now,
             "last_tick": now,
             "last_report": now,
@@ -2659,6 +2661,7 @@ async def setup_voice_stats(interaction: discord.Interaction) -> None:
     else:
         # Changing the report channel keeps the current week's accumulated totals.
         record["channel_id"] = interaction.channel.id
+        record["enabled"] = True
         record["last_tick"] = now
 
     stats_active_channels[interaction.guild.id] = active_human_voice_channels(interaction.guild)
@@ -2675,6 +2678,75 @@ async def setup_voice_stats(interaction: discord.Interaction) -> None:
     embed.add_field(name="تصفير الإحصائيات", value="كل 7 أيام", inline=True)
     embed.add_field(name="طريقة الحساب", value="وجود عضو واحد على الأقل في الروم", inline=True)
     await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="إيقاف_إحصائيات_الرومات", description="إيقاف احتساب وتحديث إحصائيات الرومات الصوتية")
+@discord.app_commands.guild_only()
+@discord.app_commands.default_permissions(manage_guild=True)
+async def stop_voice_stats(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message("هذا الأمر داخل السيرفر فقط.", ephemeral=True)
+        return
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message("تحتاج صلاحية إدارة السيرفر لاستخدام هذا الأمر.", ephemeral=True)
+        return
+    record = voice_stats.get(guild.id)
+    if not record or not record.get("channel_id"):
+        await interaction.response.send_message("إحصائيات الرومات غير مُعدة. استخدم /setup أولًا.", ephemeral=True)
+        return
+    if not record.get("enabled", True):
+        await interaction.response.send_message("إحصائيات الرومات متوقفة بالفعل. البيانات السابقة محفوظة.", ephemeral=True)
+        return
+
+    now = time.time()
+    elapsed = max(0.0, now - float(record.get("last_tick", now)))
+    for channel_id in stats_active_channels.get(guild.id, set()):
+        key = str(channel_id)
+        record.setdefault("seconds", {})[key] = float(record["seconds"].get(key, 0.0)) + elapsed
+
+    member_seconds = record.setdefault("member_seconds", {})
+    excluded_ids = excluded_temporary_voice_channel_ids(guild)
+    for voice_channel in guild.channels:
+        if not isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)) or voice_channel.id in excluded_ids:
+            continue
+        channel_totals = member_seconds.setdefault(str(voice_channel.id), {})
+        for member in voice_channel.members:
+            if not member.bot:
+                key = str(member.id)
+                channel_totals[key] = float(channel_totals.get(key, 0.0)) + elapsed
+
+    record["last_tick"] = now
+    record["enabled"] = False
+    save_voice_stats()
+    await interaction.response.send_message("تم إيقاف إحصائيات الرومات الصوتية. حُفظت البيانات السابقة ولن تُحسب مدة التوقف.")
+
+@bot.tree.command(name="تشغيل_إحصائيات_الرومات", description="استئناف إحصائيات الرومات الصوتية")
+@discord.app_commands.guild_only()
+@discord.app_commands.default_permissions(manage_guild=True)
+async def resume_voice_stats(interaction: discord.Interaction) -> None:
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message("هذا الأمر داخل السيرفر فقط.", ephemeral=True)
+        return
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message("تحتاج صلاحية إدارة السيرفر لاستخدام هذا الأمر.", ephemeral=True)
+        return
+    record = voice_stats.get(guild.id)
+    if not record or not record.get("channel_id"):
+        await interaction.response.send_message("إحصائيات الرومات غير مُعدة. استخدم /setup أولًا.", ephemeral=True)
+        return
+    if record.get("enabled", True):
+        await interaction.response.send_message("إحصائيات الرومات تعمل بالفعل.", ephemeral=True)
+        return
+
+    now = time.time()
+    record["last_tick"] = now
+    record["last_report"] = now
+    record["enabled"] = True
+    stats_active_channels[guild.id] = active_human_voice_channels(guild)
+    save_voice_stats()
+    await interaction.response.send_message("تم تشغيل إحصائيات الرومات الصوتية مجددًا. بدأ الحساب من الآن، والبيانات السابقة محفوظة.")
 
 
 
